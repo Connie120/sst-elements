@@ -52,7 +52,7 @@ v_cpu_0.addParams({
 #       "executable" : "./tests/stream-fortran",
 #       "executable" : "./tests/test-fp",
 #       "executable" : os.getenv("VANADIS_EXE", "./tests/stream-mini-musl"),
-       "executable" : os.getenv("VANADIS_EXE", "./tests/small/basic-io/hello-world"),
+       "executable" : os.getenv("VANADIS_EXE", "./tests/riscv/basic_musl"),
        "app.env_count" : 2,
        "app.env0" : "HOME=/home/sdhammo",
        "app.env1" : "NEWHOME=/home/sdhammo2",
@@ -99,7 +99,7 @@ if app_args != "":
 else:
 	print("No application arguments found, continuing with argc=0")
 
-vanadis_isa = os.getenv("VANADIS_ISA", "MIPS")
+vanadis_isa = os.getenv("VANADIS_ISA", "RISCV64")
 vanadis_decoder = "vanadis.Vanadis" + vanadis_isa + "Decoder"
 vanadis_os_hdlr = "vanadis.Vanadis" + vanadis_isa + "OSHandler"
 
