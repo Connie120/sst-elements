@@ -6,6 +6,11 @@
 #include "inst/vinstall.h"
 #include "os/vriscvcpuos.h"
 
+// Ni: Include the thread and warp classes
+#include "simt/thread.h"
+#include "simt/warp_inst.h"
+#include "simt/simt_data_structure.h"
+
 #include <cstdint>
 #include <cstring>
 
@@ -23,6 +28,11 @@
 #define VANADIS_RISCV_SIGN12_MASK       0x800
 #define VANADIS_RISCV_SIGN12_UPPER_1_32 0xFFFFF000
 #define VANADIS_RISCV_SIGN12_UPPER_1_64 0xFFFFFFFFFFFFF000LL
+
+#define NI_SIMT_TEST
+
+// Ni: debug purposes
+int decode_flag = 1;
 
 namespace SST {
 namespace Vanadis {
@@ -424,138 +434,273 @@ public:
         output->verbose(CALL_INFO, 16, 0, "-> Decode step for thr: %" PRIu32 "\n", hw_thr);
         output->verbose(CALL_INFO, 16, 0, "---> Max decodes per cycle: %" PRIu16 "\n", max_decodes_per_cycle);
 
+        #ifdef NI_SIMT_TEST
+        output->verbose(CALL_INFO, decode_flag, 0, "-> [SIMT] tick decoder\n");
+        #endif
+
         for ( uint16_t i = 0; i < max_decodes_per_cycle; ++i ) {
-            if ( !thread_rob->full() ) {
-                if ( ins_loader->hasBundleAt(ip) ) {
-                    // We have the instruction in our micro-op cache
-                    output->verbose(
-                        CALL_INFO, 16, 0, "---> Found uop bundle for ip=0x%llx, loading from cache...\n", ip);
+            #ifdef NI_SIMT_TEST
+            if (ip >=0x10208 && ip <= 0x10236) {
+                // Set pc for all of the threads
+                for (uint32_t i = 0; i < decoder_simt_threads->size(); i++) {
+                    if ((*decoder_simt_threads)[i]->get_pc() == 0) {
+                        (*decoder_simt_threads)[i]->set_pc(ip);
+                    }
+                }
+                // Need to insert multiple entries into rob
+                if (thread_rob->size() <= thread_rob->capacity() - decoder_simt_warps->size()) {
+                    if ( ins_loader->hasBundleAt(ip) ) {
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0, "---> [SIMT] Found uop bundle for ip=0x%llx, loading from cache...\n", ip);
 
-                    VanadisInstructionBundle* bundle = ins_loader->getBundleAt(ip);
-                    output->verbose(
-                        CALL_INFO, 16, 0, "----> Bundle contains %" PRIu32 " entries.\n",
-                        bundle->getInstructionCount());
+                        VanadisInstructionBundle* bundle = ins_loader->getBundleAt(ip);
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0, "----> [SIMT] Bundle contains %" PRIu32 " entries.\n",
+                            bundle->getInstructionCount());
+                        // Do we have enough space in the ROB to push the micro-op bundle into
+                        // the queue?
+                        if ( bundle->getInstructionCount() < (thread_rob->capacity() - thread_rob->size()) ) {
+                            bool bundle_has_branch = false;
+                            for ( uint32_t i = 0; i < bundle->getInstructionCount(); ++i ) {
+                                VanadisInstruction* next_ins = bundle->getInstructionByIndex(i);
 
-                    // Do we have enough space in the ROB to push the micro-op bundle into
-                    // the queue?
-                    if ( bundle->getInstructionCount() < (thread_rob->capacity() - thread_rob->size()) ) {
-                        bool bundle_has_branch = false;
+                                if ( next_ins->getInstFuncType() == INST_BRANCH ) {
+                                    VanadisSpeculatedInstruction* next_spec_ins =
+                                        dynamic_cast<VanadisSpeculatedInstruction*>(next_ins);
+                                    // Update SIMT Stack? And corresponding warp masks
 
-                        for ( uint32_t i = 0; i < bundle->getInstructionCount(); ++i ) {
-                            VanadisInstruction* next_ins = bundle->getInstructionByIndex(i);
-
-                            if ( next_ins->getInstFuncType() == INST_BRANCH ) {
-                                VanadisSpeculatedInstruction* next_spec_ins =
-                                    dynamic_cast<VanadisSpeculatedInstruction*>(next_ins);
-
-                                if ( branch_predictor->contains(ip) ) {
-                                    // We have an address predicton from the branching unit
-                                    const uint64_t predicted_address = branch_predictor->predictAddress(ip);
-                                    next_spec_ins->setSpeculatedAddress(predicted_address);
-
+                                    // No branch predictor yet, just increment ip
                                     output->verbose(
-                                        CALL_INFO, 16, 0,
-                                        "----> contains a branch: 0x%llx / predicted "
-                                        "(found in predictor): 0x%llx\n",
-                                        ip, predicted_address);
-
-                                    ip                = predicted_address;
-                                    bundle_has_branch = true;
-                                }
-                                else {
-                                    // We don't have an address prediction
-                                    // so just speculate that we are going to drop through to the
-                                    // next instruction as we aren't sure where this will go yet
-
-                                    output->verbose(
-                                        CALL_INFO, 16, 0,
-                                        "----> contains a branch: 0x%llx / predicted "
-                                        "(not-found in predictor): 0x%llx, pc-increment: %" PRIu64 "\n",
+                                        CALL_INFO, decode_flag, 0,
+                                        "----> [SIMT] contains a branch: 0x%llx / predicted "
+                                        "(no predictor for SIMT yet): 0x%llx, pc-increment: %" PRIu64 "\n",
                                         ip, ip + 4, bundle->pcIncrement());
 
                                     ip += bundle->pcIncrement();
                                     next_spec_ins->setSpeculatedAddress(ip);
                                     bundle_has_branch = true;
                                 }
+
+                                // Ignore the scheduler for now, send to rob in sequence
+                                for (int i = 0; i < decoder_simt_warps->size(); i++) {
+                                    warp_inst* warp_next_ins = new warp_inst(*next_ins, i, (*decoder_simt_warps)[i]->get_mask());
+                                    thread_rob->push(warp_next_ins);
+                                    output->verbose(
+                                        CALL_INFO, decode_flag, 0,
+                                        "----> [SIMT] warp %d ip 0x%llx issued to rob, remaining rob size"
+                                        ": %llu\n", i, ip, thread_rob->capacity() - thread_rob->size());
+                                }
                             }
 
-                            thread_rob->push(next_ins->clone());
+                            // Move to the next address, if we had a branch we should have
+                            // already found a predicted target addeess to decode
+                            // output->verbose(
+                            //     CALL_INFO, 2, 0, "----> branch? %s, ip=0x%llx + inc=%" PRIu64 " = new-ip=0x%llx\n",
+                            //     bundle_has_branch ? "yes" : "no", ip, bundle_has_branch ? 0 : bundle->pcIncrement(),
+                            //     bundle_has_branch ? ip : ip + bundle->pcIncrement());
+                            ip = bundle_has_branch ? ip : ip + bundle->pcIncrement();
                         }
-
-                        // Move to the next address, if we had a branch we should have
-                        // already found a predicted target addeess to decode
+                        else {
                         output->verbose(
-                            CALL_INFO, 16, 0, "----> branch? %s, ip=0x%llx + inc=%" PRIu64 " = new-ip=0x%llx\n",
-                            bundle_has_branch ? "yes" : "no", ip, bundle_has_branch ? 0 : bundle->pcIncrement(),
-                            bundle_has_branch ? ip : ip + bundle->pcIncrement());
-                        ip = bundle_has_branch ? ip : ip + bundle->pcIncrement();
-                    }
-                    else {
-                        output->verbose(
-                            CALL_INFO, 16, 0, "----> Not enough space in the ROB, will stall this cycle.\n");
-                    }
-                }
-                else if ( ins_loader->hasPredecodeAt(ip, 4) ) {
-                    // We have a loaded instruction cache line but have not decoded it yet
-                    output->verbose(
-                        CALL_INFO, 16, 0,
-                        "---> uop not found, but is located in the predecode "
-                        "i0-icache (ip=0x%llx)\n",
-                        ip);
-                    VanadisInstructionBundle* decoded_bundle = new VanadisInstructionBundle(ip);
-
-                    uint32_t temp_ins = 0;
-
-                    const bool predecode_bytes =
-                        ins_loader->getPredecodeBytes(output, ip, (uint8_t*)&temp_ins, sizeof(temp_ins));
-
-                    if ( predecode_bytes ) {
-                        output->verbose(CALL_INFO, 16, 0, "---> performing a decode for ip=0x%llx\n", ip);
-                        decode(output, ip, temp_ins, decoded_bundle);
-
-                        output->verbose(
-                            CALL_INFO, 16, 0, "---> bundle generates %" PRIu32 " micro-ops\n",
-                            (uint32_t)decoded_bundle->getInstructionCount());
-
-                        ins_loader->cacheDecodedBundle(decoded_bundle);
-
-                        if ( 0 == decoded_bundle->getInstructionCount() ) {
-                            output->fatal(CALL_INFO, -1, "Error - bundle at: 0x%llx generates no micro-ops.\n", ip);
+                            CALL_INFO, decode_flag, 0, "----> [SIMT] Not enough space in the ROB, will stall this cycle.\n");
                         }
-
-                        // Exit this cycle because results saved to cache are available next
-                        // cycle
-                        break;
                     }
-                    else {
-                        output->fatal(
-                            CALL_INFO, -1,
-                            "Error - predecoded bytes for 0x%llu found, but "
-                            "retrieval of bytes failed.\n",
+                    else if ( ins_loader->hasPredecodeAt(ip, 4) ) {
+                        // We have a loaded instruction cache line but have not decoded it yet
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0,
+                            "---> [SIMT] uop not found, but is located in the predecode "
+                            "i0-icache (ip=0x%llx)\n",
                             ip);
+                        
+                        VanadisInstructionBundle* decoded_bundle = new VanadisInstructionBundle(ip);
+
+                        uint32_t temp_ins = 0;
+
+                        const bool predecode_bytes =
+                            ins_loader->getPredecodeBytes(output, ip, (uint8_t*)&temp_ins, sizeof(temp_ins));
+                        
+                        if ( predecode_bytes ) {
+                            output->verbose(CALL_INFO, decode_flag, 0, "---> [SIMT] performing a decode for ip=0x%llx\n", ip);
+                            decode(output, ip, temp_ins, decoded_bundle);
+
+                            output->verbose(
+                                CALL_INFO, decode_flag, 0, "---> [SIMT] bundle generates %" PRIu32 " micro-ops\n",
+                                (uint32_t)decoded_bundle->getInstructionCount());
+
+                            ins_loader->cacheDecodedBundle(decoded_bundle);
+
+                            if ( 0 == decoded_bundle->getInstructionCount() ) {
+                                output->fatal(CALL_INFO, -1, "Error - bundle at: 0x%llx generates no micro-ops.\n", ip);
+                            }
+
+                            // Exit this cycle because results saved to cache are available next
+                            // cycle
+                            break;
+                        }
+                        else {
+                            output->fatal(
+                                CALL_INFO, -1,
+                                "[SIMT] Error - predecoded bytes for 0x%llu found, but "
+                                "retrieval of bytes failed.\n",
+                                ip);
+                        }
+                    }
+                    else {
+                        // Not in micro or predecode cache, so we have to regenrata a request
+                        // and stop further processing
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0,
+                            "---> [SIMT] microop bundle and pre-decoded bytes are not found for "
+                            "0x%llx, requested read for cache line (line=%" PRIu64 ")\n",
+                            ip, ins_loader->getCacheLineWidth());
+                        ins_loader->requestLoadAt(output, ip, 4);
+                        break;
                     }
                 }
                 else {
-                    // Not in micro or predecode cache, so we have to regenrata a request
-                    // and stop further processing
-                    output->verbose(
-                        CALL_INFO, 16, 0,
-                        "---> microop bundle and pre-decoded bytes are not found for "
-                        "0x%llx, requested read for cache line (line=%" PRIu64 ")\n",
-                        ip, ins_loader->getCacheLineWidth());
-                    ins_loader->requestLoadAt(output, ip, 4);
-                    break;
+                output->verbose(
+                    CALL_INFO, decode_flag, 0,
+                    "---> [SIMT] Decode pending queue (ROB) is full, no more "
+                    "decoded permitted this cycle.\n");
                 }
             }
             else {
-                output->verbose(
-                    CALL_INFO, 16, 0,
-                    "---> Decode pending queue (ROB) is full, no more "
-                    "decoded permitted this cycle.\n");
+            #endif
+                if ( !thread_rob->full() ) {
+                    if ( ins_loader->hasBundleAt(ip) ) {
+                        // We have the instruction in our micro-op cache
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0, "---> Found uop bundle for ip=0x%llx, loading from cache...\n", ip);
+
+                        VanadisInstructionBundle* bundle = ins_loader->getBundleAt(ip);
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0, "----> Bundle contains %" PRIu32 " entries.\n",
+                            bundle->getInstructionCount());
+
+                        // Do we have enough space in the ROB to push the micro-op bundle into
+                        // the queue?
+                        if ( bundle->getInstructionCount() < (thread_rob->capacity() - thread_rob->size()) ) {
+                            bool bundle_has_branch = false;
+
+                            for ( uint32_t i = 0; i < bundle->getInstructionCount(); ++i ) {
+                                VanadisInstruction* next_ins = bundle->getInstructionByIndex(i);
+
+                                if ( next_ins->getInstFuncType() == INST_BRANCH ) {
+                                    VanadisSpeculatedInstruction* next_spec_ins =
+                                        dynamic_cast<VanadisSpeculatedInstruction*>(next_ins);
+
+                                    if ( branch_predictor->contains(ip) ) {
+                                        // We have an address predicton from the branching unit
+                                        const uint64_t predicted_address = branch_predictor->predictAddress(ip);
+                                        next_spec_ins->setSpeculatedAddress(predicted_address);
+
+                                        output->verbose(
+                                            CALL_INFO, decode_flag, 0,
+                                            "----> contains a branch: 0x%llx / predicted "
+                                            "(found in predictor): 0x%llx\n",
+                                            ip, predicted_address);
+
+                                        ip                = predicted_address;
+                                        bundle_has_branch = true;
+                                    }
+                                    else {
+                                        // We don't have an address prediction
+                                        // so just speculate that we are going to drop through to the
+                                        // next instruction as we aren't sure where this will go yet
+
+                                        output->verbose(
+                                            CALL_INFO, decode_flag, 0,
+                                            "----> contains a branch: 0x%llx / predicted "
+                                            "(not-found in predictor): 0x%llx, pc-increment: %" PRIu64 "\n",
+                                            ip, ip + 4, bundle->pcIncrement());
+
+                                        ip += bundle->pcIncrement();
+                                        next_spec_ins->setSpeculatedAddress(ip);
+                                        bundle_has_branch = true;
+                                    }
+                                }
+
+                                thread_rob->push(next_ins->clone());
+                            }
+
+                            // Move to the next address, if we had a branch we should have
+                            // already found a predicted target addeess to decode
+                            output->verbose(
+                                CALL_INFO, decode_flag, 0, "----> branch? %s, ip=0x%llx + inc=%" PRIu64 " = new-ip=0x%llx\n",
+                                bundle_has_branch ? "yes" : "no", ip, bundle_has_branch ? 0 : bundle->pcIncrement(),
+                                bundle_has_branch ? ip : ip + bundle->pcIncrement());
+                            ip = bundle_has_branch ? ip : ip + bundle->pcIncrement();
+                        }
+                        else {
+                            output->verbose(
+                                CALL_INFO, decode_flag, 0, "----> Not enough space in the ROB, will stall this cycle.\n");
+                        }
+                    }
+                    else if ( ins_loader->hasPredecodeAt(ip, 4) ) {
+                        // We have a loaded instruction cache line but have not decoded it yet
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0,
+                            "---> uop not found, but is located in the predecode "
+                            "i0-icache (ip=0x%llx)\n",
+                            ip);
+                        VanadisInstructionBundle* decoded_bundle = new VanadisInstructionBundle(ip);
+
+                        uint32_t temp_ins = 0;
+
+                        const bool predecode_bytes =
+                            ins_loader->getPredecodeBytes(output, ip, (uint8_t*)&temp_ins, sizeof(temp_ins));
+
+                        if ( predecode_bytes ) {
+                            output->verbose(CALL_INFO, decode_flag, 0, "---> performing a decode for ip=0x%llx\n", ip);
+                            decode(output, ip, temp_ins, decoded_bundle);
+
+                            output->verbose(
+                                CALL_INFO, decode_flag, 0, "---> bundle generates %" PRIu32 " micro-ops\n",
+                                (uint32_t)decoded_bundle->getInstructionCount());
+
+                            ins_loader->cacheDecodedBundle(decoded_bundle);
+
+                            if ( 0 == decoded_bundle->getInstructionCount() ) {
+                                output->fatal(CALL_INFO, -1, "Error - bundle at: 0x%llx generates no micro-ops.\n", ip);
+                            }
+
+                            // Exit this cycle because results saved to cache are available next
+                            // cycle
+                            break;
+                        }
+                        else {
+                            output->fatal(
+                                CALL_INFO, -1,
+                                "Error - predecoded bytes for 0x%llu found, but "
+                                "retrieval of bytes failed.\n",
+                                ip);
+                        }
+                    }
+                    else {
+                        // Not in micro or predecode cache, so we have to regenrata a request
+                        // and stop further processing
+                        output->verbose(
+                            CALL_INFO, decode_flag, 0,
+                            "---> microop bundle and pre-decoded bytes are not found for "
+                            "0x%llx, requested read for cache line (line=%" PRIu64 ")\n",
+                            ip, ins_loader->getCacheLineWidth());
+                        ins_loader->requestLoadAt(output, ip, 4);
+                        break;
+                    }
+                }
+                else {
+                    output->verbose(
+                        CALL_INFO, decode_flag, 0,
+                        "---> Decode pending queue (ROB) is full, no more "
+                        "decoded permitted this cycle.\n");
+                }
+            #ifdef NI_SIMT_TEST
             }
+            #endif
         }
 
-        output->verbose(CALL_INFO, 16, 0, "---> cycle is completed, ip=0x%llx\n", ip);
+        output->verbose(CALL_INFO, decode_flag, 0, "---> cycle is completed, ip=0x%llx\n", ip);
     }
 
 protected:

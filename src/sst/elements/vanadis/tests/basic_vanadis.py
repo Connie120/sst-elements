@@ -8,7 +8,7 @@ sst.setProgramOption("stopAtCycle", "0 ns")
 # Tell SST what statistics handling we want
 sst.setStatisticLoadLevel(4)
 
-verbosity = int(os.getenv("VANADIS_VERBOSE", 0))
+verbosity = int(os.getenv("VANADIS_VERBOSE", 2))
 os_verbosity = os.getenv("VANADIS_OS_VERBOSE", verbosity)
 pipe_trace_file = os.getenv("VANADIS_PIPE_TRACE", "")
 lsq_entries = os.getenv("VANADIS_LSQ_ENTRIES", 32)
@@ -52,7 +52,7 @@ v_cpu_0.addParams({
 #       "executable" : "./tests/stream-fortran",
 #       "executable" : "./tests/test-fp",
 #       "executable" : os.getenv("VANADIS_EXE", "./tests/stream-mini-musl"),
-       "executable" : os.getenv("VANADIS_EXE", "./tests/riscv/basic_musl"),
+       "executable" : os.getenv("VANADIS_EXE", "./tests/riscv/bin/basic_musl"),
        "app.env_count" : 2,
        "app.env0" : "HOME=/home/sdhammo",
        "app.env1" : "NEWHOME=/home/sdhammo2",

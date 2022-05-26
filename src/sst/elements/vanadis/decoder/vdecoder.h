@@ -29,6 +29,10 @@
 #include "vinsloader.h"
 #include "vfpflags.h"
 
+// Ni
+#include "simt/warp_inst.h"
+#include "simt/warp.h"
+
 #include <cinttypes>
 #include <cstdint>
 #include <sst/core/interfaces/stdMem.h>
@@ -196,6 +200,10 @@ public:
     // decoded_q; }
 
     virtual void setThreadROB(VanadisCircularQueue<VanadisInstruction*>* thr_rob) { thread_rob = thr_rob; }
+    // Ni: set simt rob, simt threads and warps
+    virtual void setSIMTROB(VanadisCircularQueue<warp_inst*>* thr_rob) { warp_rob = thr_rob; }
+    virtual void setSIMTThreads(std::vector<thread_info*>* simt_threads) { decoder_simt_threads = simt_threads; }
+    virtual void setSIMTWarps(std::vector<warp*>* simt_warps) { decoder_simt_warps = simt_warps; }
 
     void     setHardwareThread(const uint32_t thr) { hw_thr = thr; }
     uint32_t getHardwareThread() const { return hw_thr; }
@@ -220,6 +228,11 @@ protected:
 
     bool                                       wantDelegatedLoad;
     VanadisCircularQueue<VanadisInstruction*>* thread_rob;
+
+    // Ni: Add a warp rob for the simt unit and a simt threads structure
+    VanadisCircularQueue<warp_inst*>* warp_rob;
+    std::vector<thread_info*>* decoder_simt_threads;
+    std::vector<warp*>* decoder_simt_warps;
 
     // VanadisCircularQueue<VanadisInstruction*>* decoded_q;
 

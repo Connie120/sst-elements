@@ -29,6 +29,10 @@
 #include "vfpflags.h"
 #include "vfuncunit.h"
 
+// Ni
+#include "simt/warp_inst.h"
+#include "simt/warp.h"
+
 #include <array>
 #include <limits>
 #include <set>
@@ -235,6 +239,15 @@ private:
     uint32_t retires_per_cycle;
 
     std::vector<VanadisCircularQueue<VanadisInstruction*>*> rob;
+    // Ni: Add warp_rob difinition for VanadisComponent
+    std::vector<VanadisCircularQueue<warp_inst*>*> v_warp_rob;
+
+    // Ni: Add simt threads
+    std::vector<std::vector<thread_info*>*> simt_threads;
+
+    // Ni: Add warps
+    std::vector<std::vector<warp*>*> m_warps;
+
     std::vector<VanadisDecoder*>                            thread_decoders;
     std::vector<const VanadisDecoderOptions*>               isa_options;
 
@@ -298,6 +311,9 @@ private:
     uint64_t pause_on_retire_address;
 
     std::vector<VanadisFloatingPointFlags*> fp_flags;
+
+    // Ni: A simt flag to indicate whether the processor is in simt state
+    // bool simt_flag;
 };
 
 } // namespace Vanadis

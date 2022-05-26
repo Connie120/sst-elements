@@ -31,7 +31,8 @@ enum VanadisFunctionalUnitType {
     INST_SYSCALL,
     INST_FENCE,
     INST_NOOP,
-    INST_FAULT
+    INST_FAULT,
+    WARP_INST  // Ni: Add for SIMT unit
 };
 
 const char*
