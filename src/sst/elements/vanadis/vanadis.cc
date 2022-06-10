@@ -23,12 +23,17 @@
 
 // Ni
 #include "simt/warp_inst.h"
+#include "simt/warp.h"
 #include "simt/thread.h"
 
 #include <cstdio>
 #include <sst/core/output.h>
 #include <vector>
 #include <cmath>
+
+// Ni: debug purposes
+int issue_flag = 2;
+int rob_flag = 2;
 
 using namespace SST::Vanadis;
 
@@ -174,6 +179,15 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         int_register_stacks.push_back(new VanadisRegisterStack(int_reg_count));
         fp_register_stacks.push_back(new VanadisRegisterStack(fp_reg_count));
 
+        std::vector<VanadisRegisterStack*> l_int;
+        std::vector<VanadisRegisterStack*> l_fp;
+        for (int j = 0; j < NUM_THREADS / WARP_SIZE; j++) {
+            l_int.push_back(new VanadisRegisterStack(int_reg_count));
+            l_fp.push_back(new VanadisRegisterStack(fp_reg_count));
+        }
+        simt_int_register_stacks.push_back(l_int);
+        simt_fp_register_stacks.push_back(l_fp);
+
         output->verbose(
             CALL_INFO, 8, 0, "Reorder buffer set to %" PRIu32 " entries, these are shared by all threads.\n",
             rob_count);
@@ -223,6 +237,18 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
     tmp_int_reg_write.reserve(max_int_regs);
     tmp_not_issued_fp_reg_read.reserve(max_fp_regs);
     tmp_fp_reg_write.reserve(max_fp_regs);
+
+    simt_tmp_not_issued_int_reg_read.reserve(NUM_WARPS);
+    simt_tmp_int_reg_write.reserve(NUM_WARPS);
+    simt_tmp_not_issued_fp_reg_read.reserve(NUM_WARPS);
+    simt_tmp_fp_reg_write.reserve(NUM_WARPS);
+
+    for (int i = 0; i < NUM_WARPS; i++) {
+        simt_tmp_not_issued_int_reg_read[i].reserve(max_int_regs);
+        simt_tmp_int_reg_write[i].reserve(max_int_regs);
+        simt_tmp_not_issued_fp_reg_read[i].reserve(max_fp_regs);
+        simt_tmp_fp_reg_write[i].reserve(max_fp_regs);
+    }
 
     resetRegisterUseTemps(max_int_regs, max_fp_regs);
 
@@ -360,6 +386,7 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
     //////////////////////////////////////////////////////////////////////////////////////
 
     uint16_t fu_id = 0;
+    uint16_t simt_fu_id = 0;
 
     const uint16_t int_arith_units  = params.find<uint16_t>("integer_arith_units", 2);
     const uint16_t int_arith_cycles = params.find<uint16_t>("integer_arith_cycles", 2);
@@ -370,6 +397,11 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
 
     for ( uint16_t i = 0; i < int_arith_units; ++i ) {
         fu_int_arith.push_back(new VanadisFunctionalUnit(fu_id++, INST_INT_ARITH, int_arith_cycles));
+    }
+
+    // Ni: Assume SIMT unit has same number of functional unit as the scalar ones for each type
+    for (uint16_t i = 0; i < int_arith_units; i++) {
+        simt_fu_int_arith.push_back(new VanadisFunctionalUnit(simt_fu_id++, INST_INT_ARITH, int_arith_cycles));
     }
 
     const uint16_t int_div_units  = params.find<uint16_t>("integer_div_units", 1);
@@ -383,6 +415,11 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         fu_int_div.push_back(new VanadisFunctionalUnit(fu_id++, INST_INT_DIV, int_div_cycles));
     }
 
+    // Ni: Assume SIMT unit has WARP_SIZE number of functional unit for each type
+    for (uint16_t i = 0; i < int_div_units; i++) {
+        simt_fu_int_div.push_back(new VanadisFunctionalUnit(simt_fu_id++, INST_INT_DIV, int_div_cycles));
+    }
+
     const uint16_t branch_units  = params.find<uint16_t>("branch_units", 1);
     const uint16_t branch_cycles = params.find<uint16_t>("branch_unit_cycles", int_arith_cycles);
 
@@ -392,6 +429,11 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
 
     for ( uint16_t i = 0; i < branch_units; ++i ) {
         fu_branch.push_back(new VanadisFunctionalUnit(fu_id++, INST_BRANCH, branch_cycles));
+    }
+
+    // Ni: Assume SIMT unit has WARP_SIZE number of functional unit for each type
+    for (uint16_t i = 0; i < branch_units; i++) {
+        simt_fu_branch.push_back(new VanadisFunctionalUnit(simt_fu_id++, INST_BRANCH, branch_cycles));
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
@@ -407,6 +449,11 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         fu_fp_arith.push_back(new VanadisFunctionalUnit(fu_id++, INST_FP_ARITH, fp_arith_cycles));
     }
 
+    // Ni: Assume SIMT unit has WARP_SIZE number of functional unit for each type
+    for (uint16_t i = 0; i < fp_arith_units; i++) {
+        simt_fu_fp_arith.push_back(new VanadisFunctionalUnit(simt_fu_id++, INST_FP_ARITH, fp_arith_cycles));
+    }
+
     const uint16_t fp_div_units  = params.find<uint16_t>("fp_div_units", 1);
     const uint16_t fp_div_cycles = params.find<uint16_t>("fp_div_cycles", 80);
 
@@ -416,6 +463,11 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
 
     for ( uint16_t i = 0; i < fp_div_units; ++i ) {
         fu_fp_div.push_back(new VanadisFunctionalUnit(fu_id++, INST_FP_DIV, fp_div_cycles));
+    }
+
+    // Ni: Assume SIMT unit has WARP_SIZE number of functional unit for each type
+    for (uint16_t i = 0; i < fp_div_units; i++) {
+        simt_fu_fp_div.push_back(new VanadisFunctionalUnit(simt_fu_id++, INST_FP_DIV, fp_div_cycles));
     }
 
     //////////////////////////////////////////////////////////////////////////////////////
@@ -515,11 +567,17 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
                 (*m_warps[i])[j] = new warp(j, 0xffffffff, 
                 new VanadisISATable(
                     thread_decoders[i]->getDecoderOptions(), thread_decoders[i]->countISAIntReg(),
-                    thread_decoders[i]->countISAFPReg()));
+                    thread_decoders[i]->countISAFPReg()),
+                new VanadisISATable(
+                thread_decoders[i]->getDecoderOptions(), thread_decoders[i]->countISAIntReg(),
+                thread_decoders[i]->countISAFPReg()));
             }
             else {
                 uint64_t remaining_threads = num_warps * WARP_SIZE - NUM_THREADS;
                 (*m_warps[i])[j] = new warp(j, (int)pow(2.0, remaining_threads)-1, 
+                new VanadisISATable(
+                    thread_decoders[i]->getDecoderOptions(), thread_decoders[i]->countISAIntReg(),
+                    thread_decoders[i]->countISAFPReg()),
                 new VanadisISATable(
                     thread_decoders[i]->getDecoderOptions(), thread_decoders[i]->countISAIntReg(),
                     thread_decoders[i]->countISAFPReg()));
@@ -529,6 +587,17 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
             CALL_INFO, 1, 0,
             "----> [SIMT] Created warps for hw_thread %u\n", i);
         thread_decoders[i]->setSIMTWarps(m_warps[i]);
+
+        for (int k = 0; k < NUM_WARPS; k++) {
+            for ( uint16_t j = 0; j < thread_decoders[i]->countISAIntReg(); ++j ) {
+                (*m_warps[i])[k]->warp_rrt->setIntPhysReg(j, simt_int_register_stacks[i][k]->pop());
+            }
+
+            for ( uint16_t j = 0; j < thread_decoders[i]->countISAFPReg(); ++j ) {
+                (*m_warps[i])[k]->warp_rrt->setFPPhysReg(j, simt_fp_register_stacks[i][k]->pop());
+            }
+            (*m_warps[i])[k]->warp_recover_rrt->reset((*m_warps[i])[k]->warp_rrt);
+        }
     }
 }
 
@@ -615,6 +684,14 @@ VANADIS_COMPONENT::resetRegisterUseTemps(const uint16_t int_reg_count, const uin
     std::fill_n(tmp_not_issued_fp_reg_read.begin(), fp_reg_count, false);
     std::fill_n(tmp_fp_reg_write.begin(), fp_reg_count, false);
 
+    for (int i = 0; i < NUM_WARPS; i++) {
+        std::fill_n(simt_tmp_not_issued_int_reg_read[i].begin(), int_reg_count, false);
+        std::fill_n(simt_tmp_int_reg_write[i].begin(), int_reg_count, false);
+
+        std::fill_n(simt_tmp_not_issued_fp_reg_read[i].begin(), fp_reg_count, false);
+        std::fill_n(simt_tmp_fp_reg_write[i].begin(), fp_reg_count, false);
+    }
+
     /*
         for (uint16_t i = 0; i < int_reg_count; ++i) {
             tmp_not_issued_int_reg_read[i] = false;
@@ -634,37 +711,6 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
 {
     const int output_verbosity = output->getVerboseLevel();
     bool      issued_an_ins    = false;
-    // Ni: Whether issued an instruction from simt rob
-    // #ifdef NI_SIMT_TEST
-    // bool issued_a_simt_ins = false;
-
-    // for ( uint32_t i = 0; i < hw_threads; ++i ) {
-    //     if ( !halted_masks[i] ) {
-    //         // we have not issued a simt instruction this cycle
-    //         issued_a_simt_ins = false;
-
-    //         // Find the next instruction which has not been issued yet
-    //         for ( uint32_t j = rob_start; j < v_warp_rob[i]->size(); ++j ) {
-    //             warp_inst* ins = v_warp_rob[i]->peekAt(j);
-
-    //             if ( !ins->completedIssue() ) {
-    //                 const int resource_check = checkInstructionResources(
-    //                     ins, int_register_stacks[i], fp_register_stacks[i], issue_isa_tables[i]);
-    //             }
-    //         }
-
-    //         // Only print the table if we issued an instruction, reduce print out
-    //         // clutter
-    //         if ( issued_a_simt_ins && (output_verbosity >= 8) ) {
-    //             issue_isa_tables[i]->print(output, register_files[i], print_int_reg, print_fp_reg);
-    //         }
-    //     }
-    //     else {
-    //         output->verbose(
-    //             CALL_INFO, 8, 0, "[SIMT Issue] thread %" PRIu32 " is halted, did not process for issue this cycle.\n", i);
-    //     }
-    // }
-    // #endif
 
     for ( uint32_t i = 0; i < hw_threads; ++i ) {
         if ( !halted_masks[i] ) {
@@ -679,6 +725,7 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
             // Find the next instruction which has not been issued yet
             for ( uint32_t j = rob_start; j < rob[i]->size(); ++j ) {
                 VanadisInstruction* ins = rob[i]->peekAt(j);
+                warp_inst* simt_ins = dynamic_cast<warp_inst*>(ins);
 
                 if ( !ins->completedIssue() ) {
 #ifdef VANADIS_BUILD_DEBUG
@@ -689,8 +736,33 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
                             ins->getInstructionAddress(), instPrintBuffer);
                     }
 #endif
-                    const int resource_check = checkInstructionResources(
-                        ins, int_register_stacks[i], fp_register_stacks[i], issue_isa_tables[i]);
+                    int resource_check = -1;
+                    uint16_t warp_id = -1;
+                    #ifdef NI_SIMT_TEST
+                    if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                        if ( output_verbosity >= issue_flag ) {
+                            ins->printToBuffer(instPrintBuffer, 1024);
+                            output->verbose(
+                                CALL_INFO, issue_flag, 0, "--> Attempting issue for: rob[%" PRIu32 "]: 0x%llx / %s / warp: %u\n", j,
+                                ins->getInstructionAddress(), instPrintBuffer, simt_ins->get_wid());
+                        }
+                        warp_id = simt_ins->get_wid();
+                        resource_check = checkInstructionResources_SIMT(
+                            dynamic_cast<warp_inst*>(ins), simt_int_register_stacks[i][warp_id], simt_fp_register_stacks[i][warp_id],
+                            (*m_warps[i])[warp_id]->warp_rrt, warp_id);
+                        if ( output_verbosity >= issue_flag ) {
+                            output->verbose(
+                                CALL_INFO, issue_flag, 0, "----> Check if registers are usable? result: %d (%s)\n", resource_check,
+                                (0 == resource_check) ? "success" : "cannot issue");
+                        }
+                    }
+                    else {
+                    #endif
+                        resource_check = checkInstructionResources(
+                            ins, int_register_stacks[i], fp_register_stacks[i], issue_isa_tables[i]);
+                    #ifdef NI_SIMT_TEST
+                    }
+                    #endif
 
 #ifdef VANADIS_BUILD_DEBUG
                     if ( output_verbosity >= 8 ) {
@@ -701,17 +773,30 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
 #endif
 
                     if ( 0 == resource_check ) {
-                        if ( ((INST_STORE == ins->getInstFuncType()) || (INST_LOAD == ins->getInstFuncType())) &&
-                             (found_load || found_store) ) {
+                        if ( (((INST_STORE == ins->getInstFuncType()) || (INST_LOAD == ins->getInstFuncType())) &&
+                             (found_load || found_store)) || 
+                             ((ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) && 
+                             (((INST_STORE == simt_ins->get_inst()->getInstFuncType()) || (INST_LOAD == simt_ins->get_inst()->getInstFuncType())) &&
+                                (found_load || found_store))) ) {
                             // We cannot issue
                         }
                         else {
-                            //							if(
-                            //(INST_LOAD == ins->getInstFuncType()) && (found_load ||
-                            // found_store) ) {
-                            //									//
-                            // We cannot issue 							} else {
-                            const int allocate_fu = allocateFunctionalUnit(ins);
+                            int allocate_fu = -1;
+                            #ifdef NI_SIMT_TEST
+                            if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                                allocate_fu = allocateFunctionalUnit_SIMT(simt_ins);
+                                if ( output_verbosity >= issue_flag ) {
+                                    output->verbose(
+                                        CALL_INFO, issue_flag, 0, "----> allocated functional unit: %s\n",
+                                        (0 == allocate_fu) ? "yes" : "no");
+                                }
+                            }
+                            else {
+                            #endif
+                                allocate_fu = allocateFunctionalUnit(ins);
+                            #ifdef NI_SIMT_TEST
+                            }
+                            #endif
 
 #ifdef VANADIS_BUILD_DEBUG
                             if ( output_verbosity >= 8 ) {
@@ -722,9 +807,31 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
 #endif
 
                             if ( 0 == allocate_fu ) {
-                                const int status = assignRegistersToInstruction(
-                                    thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg(), ins,
-                                    int_register_stacks[i], fp_register_stacks[i], issue_isa_tables[i]);
+                                int status = -1;
+                                #ifdef NI_SIMT_TEST
+                                if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                                    status = assignRegistersToInstruction(
+                                        thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg(), ins,
+                                        simt_int_register_stacks[i][simt_ins->get_wid()], simt_fp_register_stacks[i][simt_ins->get_wid()], 
+                                        (*m_warps[i])[warp_id]->warp_rrt);
+                                    ins->printToBuffer(instPrintBuffer, 1024);
+                                    output->verbose(
+                                        CALL_INFO, issue_flag, 0, "---->[SIMT] Issued for: %s / 0x%llx / status: %d / warp: %u\n",
+                                        instPrintBuffer, ins->getInstructionAddress(), status, simt_ins->get_wid());
+                                }
+                                else {
+                                #endif
+                                    status = assignRegistersToInstruction(
+                                        thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg(), ins,
+                                        int_register_stacks[i], fp_register_stacks[i], issue_isa_tables[i]);
+                                #ifdef NI_SIMT_TEST
+                                    ins->printToBuffer(instPrintBuffer, 1024);
+                                    output->verbose(
+                                        CALL_INFO, issue_flag, 0, "----> Issued for: %s / 0x%llx / status: %d\n",
+                                        instPrintBuffer, ins->getInstructionAddress(), status);
+                                }
+                                #endif
+
 #ifdef VANADIS_BUILD_DEBUG
                                 if ( output_verbosity >= 8 ) {
                                     ins->printToBuffer(instPrintBuffer, 1024);
@@ -744,37 +851,90 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
 
                     // if the instruction is *not* issued yet, we need to keep track
                     // of which instructions are being read
-                    for ( uint16_t k = 0; k < ins->countISAIntRegIn(); ++k ) {
-                        tmp_not_issued_int_reg_read[ins->getISAIntRegIn(k)] = true;
+                    #ifdef NI_SIMT_TEST
+                    if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                        for ( uint16_t k = 0; k < ins->countISAIntRegIn(); ++k ) {
+                            simt_tmp_not_issued_int_reg_read[simt_ins->get_wid()][ins->getISAIntRegIn(k)] = true;
+                        }
+
+                        for ( uint16_t k = 0; k < ins->countISAFPRegIn(); ++k ) {
+                            simt_tmp_not_issued_fp_reg_read[simt_ins->get_wid()][ins->getISAFPRegIn(k)] = true;
+                        }
+                    }
+                    else {
+                    #endif
+                        for ( uint16_t k = 0; k < ins->countISAIntRegIn(); ++k ) {
+                            tmp_not_issued_int_reg_read[ins->getISAIntRegIn(k)] = true;
+                        }
+
+                        for ( uint16_t k = 0; k < ins->countISAFPRegIn(); ++k ) {
+                            tmp_not_issued_fp_reg_read[ins->getISAFPRegIn(k)] = true;
+                        }
+                    #ifdef NI_SIMT_TEST
+                    }
+                    #endif
+                }
+
+                #ifdef NI_SIMT_TEST
+                if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                    // Collect up all integer registers we write to
+                    for ( uint16_t k = 0; k < ins->countISAIntRegOut(); ++k ) {
+                        simt_tmp_int_reg_write[simt_ins->get_wid()][ins->getISAIntRegOut(k)] = true;
                     }
 
-                    for ( uint16_t k = 0; k < ins->countISAFPRegIn(); ++k ) {
-                        tmp_not_issued_fp_reg_read[ins->getISAFPRegIn(k)] = true;
+                    // Collect up all fp registers we write to
+                    for ( uint16_t k = 0; k < ins->countISAFPRegOut(); ++k ) {
+                        simt_tmp_fp_reg_write[simt_ins->get_wid()][ins->getISAFPRegOut(k)] = true;
                     }
                 }
+                else {
+                #endif
+                    // Collect up all integer registers we write to
+                    for ( uint16_t k = 0; k < ins->countISAIntRegOut(); ++k ) {
+                        tmp_int_reg_write[ins->getISAIntRegOut(k)] = true;
+                    }
 
-                // Collect up all integer registers we write to
-                for ( uint16_t k = 0; k < ins->countISAIntRegOut(); ++k ) {
-                    tmp_int_reg_write[ins->getISAIntRegOut(k)] = true;
+                    // Collect up all fp registers we write to
+                    for ( uint16_t k = 0; k < ins->countISAFPRegOut(); ++k ) {
+                        tmp_fp_reg_write[ins->getISAFPRegOut(k)] = true;
+                    }
+                #ifdef NI_SIMT_TEST
                 }
+                #endif
 
-                // Collect up all fp registers we write to
-                for ( uint16_t k = 0; k < ins->countISAFPRegOut(); ++k ) {
-                    tmp_fp_reg_write[ins->getISAFPRegOut(k)] = true;
+                #ifdef NI_SIMT_TEST
+                if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                    // Keep track of whether we have seen a load or a store ahead of us
+                    // that hasn't been issued, because that means the LSQ hasn't seen it
+                    // yet and so we could get an ordering violation in the memory system
+                    found_store |= (INST_STORE == simt_ins->get_inst()->getInstFuncType()) && (!ins->completedIssue());
+                    found_load |= (INST_LOAD == simt_ins->get_inst()->getInstFuncType()) && (!ins->completedIssue());
+
+                    // Keep track of whether we have seen any fences, we just ensure we
+                    // cannot issue load/stores until fences complete
+                    if ( UNLIKELY(INST_FENCE == simt_ins->get_inst()->getInstFuncType()) ) {
+                        found_store = true;
+                        found_load  = true;
+                    }
                 }
+                else {
+                #endif
+                    // Keep track of whether we have seen a load or a store ahead of us
+                    // that hasn't been issued, because that means the LSQ hasn't seen it
+                    // yet and so we could get an ordering violation in the memory system
+                    found_store |= (INST_STORE == ins->getInstFuncType()) && (!ins->completedIssue());
+                    found_load |= (INST_LOAD == ins->getInstFuncType()) && (!ins->completedIssue());
 
-                // Keep track of whether we have seen a load or a store ahead of us
-                // that hasn't been issued, because that means the LSQ hasn't seen it
-                // yet and so we could get an ordering violation in the memory system
-                found_store |= (INST_STORE == ins->getInstFuncType()) && (!ins->completedIssue());
-                found_load |= (INST_LOAD == ins->getInstFuncType()) && (!ins->completedIssue());
-
-                // Keep track of whether we have seen any fences, we just ensure we
-                // cannot issue load/stores until fences complete
-                if ( UNLIKELY(INST_FENCE == ins->getInstFuncType()) ) {
-                    found_store = true;
-                    found_load  = true;
+                    // Keep track of whether we have seen any fences, we just ensure we
+                    // cannot issue load/stores until fences complete
+                    if ( UNLIKELY(INST_FENCE == ins->getInstFuncType()) ) {
+                        found_store = true;
+                        found_load  = true;
+                    }
+                #ifdef NI_SIMT_TEST
                 }
+                #endif
+                
 
                 // We issued an instruction this cycle, so exit
                 if ( issued_an_ins ) {
@@ -788,6 +948,9 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
             // clutter
             if ( issued_an_ins && (output_verbosity >= 8) ) {
                 issue_isa_tables[i]->print(output, register_files[i], print_int_reg, print_fp_reg);
+                // for (int k = 0; k < NUM_WARPS; k++) {
+                //     m_warps[i][k]->warp_rrt->print(output, register_files[i], print_int_reg, print_fp_reg);
+                // }
             }
         }
         else {
@@ -835,14 +998,14 @@ VANADIS_COMPONENT::performRetire(VanadisCircularQueue<VanadisInstruction*>* rob,
 {
 
 #ifdef VANADIS_BUILD_DEBUG
-    if ( output->getVerboseLevel() >= 8 ) {
+    if ( output->getVerboseLevel() >= rob_flag ) {
         output->verbose(
-            CALL_INFO, 8, 0, "-- ROB: %" PRIu32 " out of %" PRIu32 " entries:\n", (uint32_t)rob->size(),
+            CALL_INFO, rob_flag, 0, "-- ROB: %" PRIu32 " out of %" PRIu32 " entries:\n", (uint32_t)rob->size(),
             (uint32_t)rob->capacity());
 
         for ( int j = (int)rob->size() - 1; j >= 0; --j ) {
             output->verbose(
-                CALL_INFO, 8, 0,
+                CALL_INFO, rob_flag, 0,
                 "----> ROB[%2d]: ins: 0x%016llx / %10s / error: %3s / "
                 "issued: %3s / spec: %3s / rob-front: %3s / exe: %3s\n",
                 j, rob->peekAt(j)->getInstructionAddress(), rob->peekAt(j)->getInstCode(),
@@ -1167,6 +1330,13 @@ VANADIS_COMPONENT::mapInstructiontoFunctionalUnit(
         }
     }
 
+    if (!allocated) {
+        output->verbose(
+            CALL_INFO, issue_flag, 0,
+            "No slots for functional unit: %s\n",
+            funcTypeToString(functional_units[0]->getType()));
+    }
+
     return allocated;
 }
 
@@ -1278,6 +1448,115 @@ VANADIS_COMPONENT::allocateFunctionalUnit(VanadisInstruction* ins)
     }
 }
 
+int
+VANADIS_COMPONENT::allocateFunctionalUnit_SIMT(warp_inst* ins)
+{
+    bool allocated_fu = false;
+
+    // output->verbose(
+    //         CALL_INFO, issue_flag, 0,
+    //         "The functional unit that's trying to allocate: %s\n",
+    //         funcTypeToString(ins->get_inst()->getInstFuncType()));
+
+    switch ( ins->get_inst()->getInstFuncType() ) {
+    case INST_INT_ARITH:
+        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_int_arith);
+        break;
+
+    case INST_LOAD:
+    if ( !lsq->loadFull() ) {
+        stat_loads_issued->addData(1);
+
+        lsq->push((VanadisLoadInstruction*)ins->get_inst());
+        allocated_fu = true;
+    }
+    break;
+
+    case INST_STORE:
+        if ( !lsq->storeFull() ) {
+            stat_stores_issued->addData(1);
+
+            lsq->push((VanadisStoreInstruction*)ins->get_inst());
+            allocated_fu = true;
+        }
+        break;
+
+    case INST_FP_ARITH:
+        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_fp_arith);
+        break;
+
+    case INST_BRANCH:
+        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_branch);
+        break;
+
+    case INST_INT_DIV:
+        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_int_div);
+        break;
+
+    case INST_FP_DIV:
+        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_fp_div);
+        break;
+
+    case INST_FENCE:
+    {
+        VanadisFenceInstruction* fence_ins = dynamic_cast<VanadisFenceInstruction*>(ins->get_inst());
+
+        if ( nullptr == fence_ins ) {
+            output->fatal(
+                CALL_INFO, -1,
+                "Error: instruction (0x%0llu) is a fence but not "
+                "convertable to a fence instruction.\n",
+                ins->getInstructionAddress());
+        }
+
+        allocated_fu = true;
+
+        output->verbose(
+            CALL_INFO, 16, 0,
+            "[fence]: processing ins: 0x%0llx functional unit "
+            "allocation for fencing (lsq-load size: %" PRIu32 " / lsq-store-buffer size: %" PRIu32 ")\n",
+            ins->getInstructionAddress(), (uint32_t)lsq->loadSize(), (uint32_t)lsq->storeBufferSize());
+
+        if ( fence_ins->createsStoreFence() ) {
+            if ( lsq->storeBufferSize() == 0 ) { allocated_fu = true; }
+            else {
+                allocated_fu = false;
+            }
+        }
+
+        if ( fence_ins->createsLoadFence() ) {
+            if ( lsq->loadSize() == 0 ) { allocated_fu = allocated_fu & true; }
+            else {
+                allocated_fu = false;
+            }
+        }
+
+        output->verbose(CALL_INFO, 16, 0, "[fence]: can proceed? %s\n", allocated_fu ? "yes" : "no");
+
+        if ( allocated_fu ) { ins->markExecuted(); }
+    } break;
+
+    case INST_NOOP:
+    case INST_FAULT:
+        ins->markExecuted();
+        allocated_fu = true;
+        break;
+    case INST_SYSCALL:
+        if ( lsq->storeBufferSize() == 0 &&  lsq->loadSize() == 0 ) { 
+            allocated_fu = true;
+        }
+        break;
+    default:
+        output->fatal(CALL_INFO, -1, "Error - no processing for instruction class (%s)\n", ins->get_inst()->getInstCode());
+        break;
+    }
+
+    if ( allocated_fu ) { return 0; }
+    else {
+        return 1;
+    }
+}
+
 bool
 VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
 {
@@ -1295,6 +1574,18 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
     bool should_process = false;
     for ( uint32_t i = 0; i < hw_threads; ++i ) {
         should_process = should_process | halted_masks[i];
+    }
+
+    // Ni: set the sp value for simt unit
+    for (int i = 0; i < hw_threads; i++) {
+        uint64_t sp_array[WARP_SIZE];
+        uint64_t sp_value = register_files[i]->getIntReg<uint64_t>(2);  // Get the sp value from scalar registers
+        for (int j = 0; j < WARP_SIZE; j++) {
+            sp_array[j] = sp_value;
+        }
+        for (int j = 0; j < NUM_WARPS; j++) {
+            register_files[i]->setIntReg_SIMT(2, sp_array, j);
+        }
     }
 
 #ifdef VANADIS_BUILD_DEBUG
@@ -1625,7 +1916,7 @@ VANADIS_COMPONENT::checkInstructionResources(
     for ( uint16_t i = 0; i < int_reg_out_count; ++i ) {
         const uint16_t ins_isa_reg = ins->getISAIntRegOut(i);
 
-        // Check there are no RAW in the pending instruction queue
+        // Check there are no WAR in the pending instruction queue
         resources_good &= (!tmp_not_issued_int_reg_read[ins_isa_reg]);
     }
 
@@ -1651,6 +1942,121 @@ VANADIS_COMPONENT::checkInstructionResources(
     if ( output_verbosity >= 16 ) {
         output->verbose(
             CALL_INFO, 16, 0, "--> Check output floating-point registers, issue-status: %s\n",
+            (resources_good ? "yes" : "no"));
+    }
+#endif
+
+    if ( !resources_good ) { return 5; }
+
+    return 0;
+}
+
+int 
+VANADIS_COMPONENT::checkInstructionResources_SIMT(
+    warp_inst* ins, VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs,
+    VanadisISATable* isa_table, uint16_t warp_id) 
+{
+    bool      resources_good   = true;
+    const int output_verbosity = output->getVerboseLevel();
+
+    // We need places to store our output registers
+    // Ni: Probably need to add vector registers
+    resources_good &= (int_regs->unused() >= ins->countISAIntRegOut());
+    resources_good &= (fp_regs->unused() >= ins->countISAFPRegOut());
+
+    if ( !resources_good ) {
+#ifdef VANADIS_BUILD_DEBUG
+        output->verbose(
+            CALL_INFO, 16, 0,
+            "----> [SIMT] insufficient output / req: int: %" PRIu16 " fp: %" PRIu16 " / free: int: %" PRIu16 " fp: %" PRIu16
+            "\n",
+            (uint16_t)ins->countISAIntRegOut(), (uint16_t)ins->countISAFPRegOut(), (uint16_t)int_regs->unused(),
+            (uint16_t)fp_regs->unused());
+#endif
+        return 1;
+    }
+
+    // If there are any pending writes against our reads, we can't issue until
+    // they are done
+    const uint16_t int_reg_in_count = ins->countISAIntRegIn();
+    for ( uint16_t i = 0; i < int_reg_in_count; ++i ) {
+        const uint16_t ins_isa_reg = ins->getISAIntRegIn(i);
+        resources_good &= (!isa_table->pendingIntWrites(ins_isa_reg));
+        if (!resources_good) {
+            if ( output_verbosity >= issue_flag ) {
+                output->verbose(
+                    CALL_INFO, issue_flag, 0, "--> [SIMT] There's pending write on reg %u\n", ins_isa_reg);
+            }
+        }
+
+        // Check there are no RAW in the pending instruction queue
+        resources_good &= (!simt_tmp_int_reg_write[warp_id][ins_isa_reg]);
+        if (!resources_good) {
+            if ( output_verbosity >= issue_flag ) {
+                output->verbose(
+                    CALL_INFO, issue_flag, 0, "--> [SIMT] There's not issued pending write on reg %u\n", ins_isa_reg);
+            }
+        }
+    }
+
+#ifdef VANADIS_BUILD_DEBUG
+    if ( output_verbosity >= 16 ) {
+        output->verbose(
+            CALL_INFO, 16, 0, "--> [SIMT] Check input integer registers, issue-status: %s\n", (resources_good ? "yes" : "no"));
+    }
+#endif
+
+    if ( !resources_good ) { return 2; }
+
+    const uint16_t fp_reg_in_count = ins->countISAFPRegIn();
+    for ( uint16_t i = 0; i < fp_reg_in_count; ++i ) {
+        const uint16_t ins_isa_reg = ins->getISAFPRegIn(i);
+        resources_good &= (!isa_table->pendingFPWrites(ins_isa_reg));
+
+        // Check there are no RAW in the pending instruction queue
+        resources_good &= (!simt_tmp_fp_reg_write[warp_id][ins_isa_reg]);
+    }
+
+#ifdef VANADIS_BUILD_DEBUG
+    if ( output_verbosity >= 16 ) {
+        output->verbose(
+            CALL_INFO, 16, 0, "--> [SIMT] Check input floating-point registers, issue-status: %s\n",
+            (resources_good ? "yes" : "no"));
+    }
+#endif
+
+    if ( !resources_good ) { return 3; }
+
+    const uint16_t int_reg_out_count = ins->countISAIntRegOut();
+    for ( uint16_t i = 0; i < int_reg_out_count; ++i ) {
+        const uint16_t ins_isa_reg = ins->getISAIntRegOut(i);
+
+        // Check there are no WAR in the pending instruction queue
+        resources_good &= (!simt_tmp_not_issued_int_reg_read[warp_id][ins_isa_reg]);
+    }
+
+#ifdef VANADIS_BUILD_DEBUG
+    if ( output_verbosity >= 16 ) {
+        output->verbose(
+            CALL_INFO, 16, 0, "--> [SIMT] Check output integer registers, issue-status: %s\n",
+            (resources_good ? "yes" : "no"));
+    }
+#endif
+
+    if ( !resources_good ) { return 4; }
+
+    const uint16_t fp_reg_out_count = ins->countISAFPRegOut();
+    for ( uint16_t i = 0; i < ins->countISAFPRegOut(); ++i ) {
+        const uint16_t ins_isa_reg = ins->getISAFPRegOut(i);
+
+        // Check there are no RAW in the pending instruction queue
+        resources_good &= (!simt_tmp_not_issued_fp_reg_read[warp_id][ins_isa_reg]);
+    }
+
+#ifdef VANADIS_BUILD_DEBUG
+    if ( output_verbosity >= 16 ) {
+        output->verbose(
+            CALL_INFO, 16, 0, "--> [SIMT] Check output floating-point registers, issue-status: %s\n",
             (resources_good ? "yes" : "no"));
     }
 #endif
@@ -1793,6 +2199,9 @@ VANADIS_COMPONENT::assignRegistersToInstruction(
 
             ins->setPhysIntRegOut(i, out_reg);
             isa_table->incIntWrite(ins_isa_reg);
+            if (ins_isa_reg == 8) {
+                printf("increase reg s0 pending write!!!\n");
+            }
         }
 
         // Set current ISA registers required for output
@@ -1828,6 +2237,13 @@ VANADIS_COMPONENT::assignRegistersToInstruction(
     }
 
     return 0;
+}
+
+int
+VANADIS_COMPONENT::assignRegistersToInstruction_SIMT(
+    const uint16_t int_reg_count, const uint16_t fp_reg_count, VanadisInstruction* ins, VanadisRegisterStack* int_regs,
+    VanadisRegisterStack* fp_regs, VanadisISATable* isa_table) 
+{
 }
 
 int
@@ -2250,12 +2666,24 @@ VANADIS_COMPONENT::handleMisspeculate(const uint32_t hw_thr, const uint64_t new_
     clearFuncUnit(hw_thr, fu_fp_div);
     clearFuncUnit(hw_thr, fu_branch);
 
+    clearFuncUnit(hw_thr, simt_fu_int_arith);
+    clearFuncUnit(hw_thr, simt_fu_int_div);
+    clearFuncUnit(hw_thr, simt_fu_fp_arith);
+    clearFuncUnit(hw_thr, simt_fu_fp_div);
+    clearFuncUnit(hw_thr, simt_fu_branch);
+
     lsq->clearLSQByThreadID(hw_thr);
     resetRegisterStacks(hw_thr);
     clearROBMisspeculate(hw_thr);
 
     // Reset the ISA table to get correct ISA to physical mappings
     issue_isa_tables[hw_thr]->reset(retire_isa_tables[hw_thr]);
+
+    // Need to do the same thing for SIMT, but just clear everything for now,
+    // need to fix this during retire stage
+    for (int i = 0; i < NUM_WARPS; i++) {
+        (*m_warps[hw_thr])[i]->warp_rrt->reset((*m_warps[hw_thr])[i]->warp_recover_rrt);
+    }
 
     // Notify the decoder we need a clear and reset to new instruction pointer
     thread_decoders[hw_thr]->setInstructionPointerAfterMisspeculate(output, new_ip);
@@ -2317,6 +2745,26 @@ VANADIS_COMPONENT::resetRegisterStacks(const uint32_t hw_thr)
         CALL_INFO, 16, 0, "---> Floating point stack contains %" PRIu32 " registers.\n",
         (uint32_t)thr_fp_stack->size());
 #endif
+
+    for (int k = 0; k < NUM_WARPS; k++) {
+        const uint16_t int_reg_count = simt_int_register_stacks[hw_thr][k]->capacity(); 
+
+        VanadisRegisterStack* thr_int_stack = simt_int_register_stacks[hw_thr][k];
+        thr_int_stack->clear();
+
+        for ( uint16_t i = 0; i < int_reg_count; ++i ) {
+            if ( !(*m_warps[hw_thr])[k]->warp_recover_rrt->physIntRegInUse(i) ) { thr_int_stack->push(i); }
+        }
+
+        const uint16_t fp_reg_count = simt_fp_register_stacks[hw_thr][k]->capacity();
+
+        VanadisRegisterStack* thr_fp_stack = simt_fp_register_stacks[hw_thr][k];
+        thr_fp_stack->clear();
+
+        for ( uint16_t i = 0; i < fp_reg_count; ++i ) {
+            if ( !(*m_warps[hw_thr])[k]->warp_recover_rrt->physFPRegInUse(i) ) { thr_fp_stack->push(i); }
+        }
+    }
 }
 
 void
@@ -2344,6 +2792,8 @@ VANADIS_COMPONENT::clearROBMisspeculate(const uint32_t hw_thr)
     thr_rob->clear();
 
     thr_simt_rob->clear();
+
+    output->verbose(CALL_INFO, 1, 0, "---> Cleared the pipeline due to miss speculation\n");
 }
 
 void

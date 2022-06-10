@@ -210,9 +210,17 @@ private:
         const uint16_t int_reg_count, const uint16_t fp_reg_count, VanadisInstruction* ins,
         VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs, VanadisISATable* isa_table);
 
+    int assignRegistersToInstruction_SIMT(
+        const uint16_t int_reg_count, const uint16_t fp_reg_count, VanadisInstruction* ins,
+        VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs, VanadisISATable* isa_table);
+
     int checkInstructionResources(
         VanadisInstruction* ins, VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs,
         VanadisISATable* isa_table);
+
+    int checkInstructionResources_SIMT(
+        warp_inst* ins, VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs,
+        VanadisISATable* isa_table, uint16_t warp_id);
 
     int recoverRetiredRegisters(
         VanadisInstruction* ins, VanadisRegisterStack* int_regs, VanadisRegisterStack* fp_regs,
@@ -224,6 +232,7 @@ private:
     int  performExecute(const uint64_t cycle);
     int  performRetire(VanadisCircularQueue<VanadisInstruction*>* rob, const uint64_t cycle);
     int  allocateFunctionalUnit(VanadisInstruction* ins);
+    int  allocateFunctionalUnit_SIMT(warp_inst* ins);
     bool mapInstructiontoFunctionalUnit(VanadisInstruction* ins, std::vector<VanadisFunctionalUnit*>& functional_units);
 
     SST::Output* output;
@@ -257,9 +266,18 @@ private:
     std::vector<VanadisFunctionalUnit*> fu_fp_arith;
     std::vector<VanadisFunctionalUnit*> fu_fp_div;
 
+    std::vector<VanadisFunctionalUnit*> simt_fu_int_arith;
+    std::vector<VanadisFunctionalUnit*> simt_fu_int_div;
+    std::vector<VanadisFunctionalUnit*> simt_fu_branch;
+    std::vector<VanadisFunctionalUnit*> simt_fu_fp_arith;
+    std::vector<VanadisFunctionalUnit*> simt_fu_fp_div;
+
     std::vector<VanadisRegisterFile*>  register_files;
     std::vector<VanadisRegisterStack*> int_register_stacks;
     std::vector<VanadisRegisterStack*> fp_register_stacks;
+
+    std::vector<std::vector<VanadisRegisterStack*>> simt_int_register_stacks;
+    std::vector<std::vector<VanadisRegisterStack*>> simt_fp_register_stacks;
 
     std::vector<VanadisISATable*> issue_isa_tables;
     std::vector<VanadisISATable*> retire_isa_tables;
@@ -268,6 +286,11 @@ private:
     std::vector<bool> tmp_int_reg_write;
     std::vector<bool> tmp_not_issued_fp_reg_read;
     std::vector<bool> tmp_fp_reg_write;
+
+    std::vector<std::vector<bool>> simt_tmp_not_issued_int_reg_read;
+    std::vector<std::vector<bool>> simt_tmp_int_reg_write;
+    std::vector<std::vector<bool>> simt_tmp_not_issued_fp_reg_read;
+    std::vector<std::vector<bool>> simt_tmp_fp_reg_write;
 
     std::list<VanadisInsCacheLoadRecord*>* icache_load_records;
 

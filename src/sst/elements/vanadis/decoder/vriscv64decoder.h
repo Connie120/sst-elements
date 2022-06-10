@@ -32,7 +32,7 @@
 #define NI_SIMT_TEST
 
 // Ni: debug purposes
-int decode_flag = 1;
+int decode_flag = 3;
 
 namespace SST {
 namespace Vanadis {
@@ -434,18 +434,18 @@ public:
         output->verbose(CALL_INFO, 16, 0, "-> Decode step for thr: %" PRIu32 "\n", hw_thr);
         output->verbose(CALL_INFO, 16, 0, "---> Max decodes per cycle: %" PRIu16 "\n", max_decodes_per_cycle);
 
-        #ifdef NI_SIMT_TEST
-        output->verbose(CALL_INFO, decode_flag, 0, "-> [SIMT] tick decoder\n");
-        #endif
+        // #ifdef NI_SIMT_TEST
+        // output->verbose(CALL_INFO, decode_flag, 0, "-> [SIMT] tick decoder\n");
+        // #endif
 
         for ( uint16_t i = 0; i < max_decodes_per_cycle; ++i ) {
             #ifdef NI_SIMT_TEST
             if (ip >=0x10208 && ip <= 0x10236) {
                 // Set pc for all of the threads
                 for (uint32_t i = 0; i < decoder_simt_threads->size(); i++) {
-                    if ((*decoder_simt_threads)[i]->get_pc() == 0) {
+                    // if ((*decoder_simt_threads)[i]->get_pc() == 0) {
                         (*decoder_simt_threads)[i]->set_pc(ip);
-                    }
+                    // }
                 }
                 // Need to insert multiple entries into rob
                 if (thread_rob->size() <= thread_rob->capacity() - decoder_simt_warps->size()) {
@@ -483,7 +483,7 @@ public:
 
                                 // Ignore the scheduler for now, send to rob in sequence
                                 for (int i = 0; i < decoder_simt_warps->size(); i++) {
-                                    warp_inst* warp_next_ins = new warp_inst(*next_ins, i, (*decoder_simt_warps)[i]->get_mask());
+                                    warp_inst* warp_next_ins = new warp_inst(next_ins, i, (*decoder_simt_warps)[i]->get_mask());
                                     thread_rob->push(warp_next_ins);
                                     output->verbose(
                                         CALL_INFO, decode_flag, 0,

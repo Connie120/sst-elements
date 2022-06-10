@@ -19,6 +19,8 @@
 #include "decoder/visaopts.h"
 #include "inst/regfile.h"
 
+#include "simt/simt_data_structure.h"
+
 #include <cstdint>
 
 namespace SST {

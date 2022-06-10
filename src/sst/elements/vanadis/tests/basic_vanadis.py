@@ -131,8 +131,8 @@ v_cpu_0_lsq.addParams({
 	"address_mask" : 0xFFFFFFFF,
 #	"address_trace" : "address-lsq2.trace",
 #	"allow_speculated_operations" : 0,
-#	"load_store_entries" : 56,
-	"load_store_entries" : lsq_entries,
+	"load_store_entries" : 56,
+	# "load_store_entries" : lsq_entries,
 	"fault_non_written_loads_after" : 0,
 	"check_memory_loads" : "no"
 })

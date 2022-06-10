@@ -20,6 +20,8 @@
 #include "decoder/visaopts.h"
 #include "inst/fpregmode.h"
 
+#include "simt/simt_data_structure.h"
+
 #include <cstring>
 #include <sst/core/output.h>
 #include <sst/core/sst_types.h>
@@ -48,12 +50,26 @@ public:
 
         fp_reg_storage = new char[fp_reg_width * count_fp_regs];
         std::memset(fp_reg_storage, 0, (fp_reg_width * count_fp_regs));
+
+        // Ni: SIMT registers have the same count as scalar registers
+        for (int i = 0; i < NUM_THREADS / WARP_SIZE; i++) {
+            simt_int_reg_storage.push_back(new char[int_reg_width * count_int_regs * WARP_SIZE]);
+            std::memset(simt_int_reg_storage[i], 0, (int_reg_width * count_int_regs * WARP_SIZE));
+
+            simt_fp_reg_storage.push_back(new char[fp_reg_width * count_fp_regs * WARP_SIZE]);
+            std::memset(simt_fp_reg_storage[i], 0, (fp_reg_width * count_fp_regs * WARP_SIZE));
+        }
     }
 
     ~VanadisRegisterFile()
     {
         delete[] int_reg_storage;
         delete[] fp_reg_storage;
+
+        for (int i = 0; i < NUM_THREADS / WARP_SIZE; i++) {
+            delete[] simt_int_reg_storage[i];
+            delete[] simt_fp_reg_storage[i];
+        }
     }
 
     const VanadisDecoderOptions* getDecoderOptions() const { return decoder_opts; }
@@ -68,6 +84,18 @@ public:
     {
         assert(reg < count_fp_regs);
         return fp_reg_storage + (fp_reg_width * reg);
+    }
+
+    char* getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    {
+        assert(reg < count_int_regs);
+        return simt_int_reg_storage[warp_id] + (int_reg_width * WARP_SIZE * reg);
+    }
+
+    char* getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    {
+        assert(reg < count_fp_regs);
+        return simt_fp_reg_storage[warp_id] + (fp_reg_width * WARP_SIZE * reg);
     }
 
     template <typename T>
@@ -91,6 +119,31 @@ public:
         assert(reg < count_fp_regs);
 
         char* reg_start   = &fp_reg_storage[reg * fp_reg_width];
+        T*    reg_start_T = (T*)reg_start;
+        return *(reg_start_T);
+    }
+
+    template <typename T>
+    T getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    {
+        assert(reg < count_int_regs);
+
+        if ( reg != decoder_opts->getRegisterIgnoreWrites() ) {
+            char* reg_start   = &simt_int_reg_storage[warp_id][reg * WARP_SIZE * int_reg_width];
+            T*    reg_start_T = (T*)reg_start;
+            return *(reg_start_T);
+        }
+        else {
+            return T();
+        }
+    }
+
+    template <typename T>
+    T getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    {
+        assert(reg < count_fp_regs);
+
+        char* reg_start   = &simt_fp_reg_storage[warp_id][reg * WARP_SIZE * fp_reg_width];
         T*    reg_start_T = (T*)reg_start;
         return *(reg_start_T);
     }
@@ -121,6 +174,38 @@ public:
         assert(reg < count_fp_regs);
 
         *((T*)&fp_reg_storage[fp_reg_width * reg]) = val;
+    }
+
+    template <typename T>
+    void setIntReg_SIMT(const uint16_t reg, const T* val, const uint16_t warp_id, const bool sign_extend = true)
+    {
+        assert(reg < count_int_regs);
+
+        if ( LIKELY(reg != decoder_opts->getRegisterIgnoreWrites()) ) {
+            T*    reg_ptr_t = (T*)(&simt_int_reg_storage[warp_id][int_reg_width * WARP_SIZE * reg]);
+            char* reg_ptr_c = (char*)(reg_ptr_t);
+
+            for (int i = 0; i < WARP_SIZE; i++) {
+                reg_ptr_t[i] = val[i];
+
+                // if we need to sign extend, check if the most-significant bit is a 1, if yes then
+                // fill with 0xFF, otherwise fill with 0x00
+                std::memset(
+                    &reg_ptr_c[int_reg_width*i+sizeof(T)],
+                    sign_extend ? ((val[i] & (static_cast<T>(1) << (sizeof(T) * 8 - 1))) == 0) ? 0x00 : 0xFF : 0x00,
+                    int_reg_width - sizeof(T));
+            }
+        }
+    }
+
+    template <typename T>
+    void setFPReg_SIMT(const uint16_t reg, const T* val, const uint16_t warp_id)
+    {
+        assert(reg < count_fp_regs);
+
+        for (int i = 0; i < WARP_SIZE; i++) {
+            (T*)(&simt_fp_reg_storage[warp_id][fp_reg_width * WARP_SIZE * reg])[i] = val[i];
+        }
     }
 
     uint32_t getHWThread() const { return hw_thread; }
@@ -173,6 +258,10 @@ private:
 
     char* int_reg_storage;
     char* fp_reg_storage;
+
+    // Ni: Add SIMT register storages
+    std::vector<char*> simt_int_reg_storage;
+    std::vector<char*> simt_fp_reg_storage;
 
     VanadisFPRegisterMode fp_reg_mode;
     const uint32_t              fp_reg_width;

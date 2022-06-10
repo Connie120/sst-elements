@@ -21,3 +21,4 @@ tags
 *.dot
 bin/
 objdump_files/
+simt_result

@@ -6,6 +6,8 @@
 #define WARP_SIZE 32
 #define NUM_THREADS 64
 
+#define NUM_WARPS ((NUM_THREADS) / (WARP_SIZE))
+
 #define WARP_INT_REGS 32
 #define WARP_FP_REGS 32
 

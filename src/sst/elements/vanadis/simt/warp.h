@@ -16,22 +16,24 @@ namespace Vanadis {
 
 class warp {
 public:
-    warp(uint64_t wid, active_mask_t mask) :
+    warp(uint16_t wid, active_mask_t mask, VanadisISATable* warp_ISATable, VanadisISATable* warp_recover_ISATable) :
         _wid(wid), 
         _mask(mask),
-        warp_rrt(warp_ISATable) {}
+        warp_rrt(warp_ISATable),
+        warp_recover_rrt(warp_recover_ISATable) {}
 
-    uint64_t get_wid() { return _wid; }
+    uint16_t get_wid() { return _wid; }
     active_mask_t get_mask() { return _mask; }
 
     void set_mask(active_mask_t next_mask) { _mask = next_mask; }
 
 public:
     VanadisISATable* warp_rrt;
+    VanadisISATable* warp_recover_rrt;
 
 private:
     active_mask_t _mask;
-    uint64_t _wid;
+    uint16_t _wid;
 };
 
 }  // namespace Vanadis
