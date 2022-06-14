@@ -181,7 +181,7 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
 
         std::vector<VanadisRegisterStack*> l_int;
         std::vector<VanadisRegisterStack*> l_fp;
-        for (int j = 0; j < NUM_THREADS / WARP_SIZE; j++) {
+        for (int j = 0; j < NUM_WARPS; j++) {
             l_int.push_back(new VanadisRegisterStack(int_reg_count));
             l_fp.push_back(new VanadisRegisterStack(fp_reg_count));
         }
@@ -723,9 +723,29 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
             issued_an_ins = false;
 
             // Find the next instruction which has not been issued yet
+            // If there's a previously issued instruction, set the rob_start to the next one
+            // uint32_t rob_start_temp = 0;
+            // if (rob_start != 0) {
+            //     rob_start_temp = rob_start + 1;
+            // }
             for ( uint32_t j = rob_start; j < rob[i]->size(); ++j ) {
                 VanadisInstruction* ins = rob[i]->peekAt(j);
                 warp_inst* simt_ins = dynamic_cast<warp_inst*>(ins);
+
+                // if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                //     for (int k = 0; k < NUM_WARPS; k++) {
+                //         bool warp_pending_write = false;
+                //         for (int m = 0; m < thread_decoders[i]->countISAIntReg(); m++) {
+                //             if ((*m_warps[i])[k]->warp_rrt->pendingIntWrites(m)) {
+                //                 warp_pending_write = true;
+                //                 printf("In performIssue: Reg %d pending write, warp %d\n", m, k);
+                //             }
+                //         }
+                //         if (!warp_pending_write) {
+                //             printf("No pending write for warp %d\n", k);
+                //         }
+                //     }
+                // }
 
                 if ( !ins->completedIssue() ) {
 #ifdef VANADIS_BUILD_DEBUG
@@ -1982,7 +2002,7 @@ VANADIS_COMPONENT::checkInstructionResources_SIMT(
     for ( uint16_t i = 0; i < int_reg_in_count; ++i ) {
         const uint16_t ins_isa_reg = ins->getISAIntRegIn(i);
         resources_good &= (!isa_table->pendingIntWrites(ins_isa_reg));
-        if (!resources_good) {
+        if (isa_table->pendingIntWrites(ins_isa_reg)) {
             if ( output_verbosity >= issue_flag ) {
                 output->verbose(
                     CALL_INFO, issue_flag, 0, "--> [SIMT] There's pending write on reg %u\n", ins_isa_reg);
@@ -1991,7 +2011,7 @@ VANADIS_COMPONENT::checkInstructionResources_SIMT(
 
         // Check there are no RAW in the pending instruction queue
         resources_good &= (!simt_tmp_int_reg_write[warp_id][ins_isa_reg]);
-        if (!resources_good) {
+        if (simt_tmp_int_reg_write[warp_id][ins_isa_reg]) {
             if ( output_verbosity >= issue_flag ) {
                 output->verbose(
                     CALL_INFO, issue_flag, 0, "--> [SIMT] There's not issued pending write on reg %u\n", ins_isa_reg);
@@ -2200,7 +2220,7 @@ VANADIS_COMPONENT::assignRegistersToInstruction(
             ins->setPhysIntRegOut(i, out_reg);
             isa_table->incIntWrite(ins_isa_reg);
             if (ins_isa_reg == 8) {
-                printf("increase reg s0 pending write!!!\n");
+                printf("increase reg s0 pending write\n");
             }
         }
 
@@ -2682,7 +2702,17 @@ VANADIS_COMPONENT::handleMisspeculate(const uint32_t hw_thr, const uint64_t new_
     // Need to do the same thing for SIMT, but just clear everything for now,
     // need to fix this during retire stage
     for (int i = 0; i < NUM_WARPS; i++) {
+        // bool warp_pending_write = false;
         (*m_warps[hw_thr])[i]->warp_rrt->reset((*m_warps[hw_thr])[i]->warp_recover_rrt);
+        // for (int j = 0; j < thread_decoders[hw_thr]->countISAIntReg(); j++) {
+            // if ((*m_warps[hw_thr])[i]->warp_rrt->pendingIntWrites(j)) {
+            //     warp_pending_write = true;
+            //     printf("After pipeline clear: Reg %d pending write, warp %d\n", j, i);
+            // }
+        // }
+        // if (!warp_pending_write) {
+        //     printf("No pending write for warp %d\n", i);
+        // }
     }
 
     // Notify the decoder we need a clear and reset to new instruction pointer
