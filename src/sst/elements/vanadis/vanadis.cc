@@ -732,21 +732,6 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, uint32_t& rob_start, bool&
                 VanadisInstruction* ins = rob[i]->peekAt(j);
                 warp_inst* simt_ins = dynamic_cast<warp_inst*>(ins);
 
-                // if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
-                //     for (int k = 0; k < NUM_WARPS; k++) {
-                //         bool warp_pending_write = false;
-                //         for (int m = 0; m < thread_decoders[i]->countISAIntReg(); m++) {
-                //             if ((*m_warps[i])[k]->warp_rrt->pendingIntWrites(m)) {
-                //                 warp_pending_write = true;
-                //                 printf("In performIssue: Reg %d pending write, warp %d\n", m, k);
-                //             }
-                //         }
-                //         if (!warp_pending_write) {
-                //             printf("No pending write for warp %d\n", k);
-                //         }
-                //     }
-                // }
-
                 if ( !ins->completedIssue() ) {
 #ifdef VANADIS_BUILD_DEBUG
                     if ( output_verbosity >= 8 ) {
@@ -1007,6 +992,26 @@ VANADIS_COMPONENT::performExecute(const uint64_t cycle)
         next_fu->tick(cycle, output, register_files);
     }
 
+    for ( VanadisFunctionalUnit* next_fu : simt_fu_int_arith ) {
+        next_fu->tick(cycle, output, register_files);
+    }
+
+    for ( VanadisFunctionalUnit* next_fu : simt_fu_int_div ) {
+        next_fu->tick(cycle, output, register_files);
+    }
+
+    for ( VanadisFunctionalUnit* next_fu : simt_fu_fp_arith ) {
+        next_fu->tick(cycle, output, register_files);
+    }
+
+    for ( VanadisFunctionalUnit* next_fu : simt_fu_fp_div ) {
+        next_fu->tick(cycle, output, register_files);
+    }
+
+    for ( VanadisFunctionalUnit* next_fu : simt_fu_branch ) {
+        next_fu->tick(cycle, output, register_files);
+    }
+
     // Tick the load/store queue
     lsq->tick((uint64_t)cycle);
 
@@ -1198,17 +1203,31 @@ VANADIS_COMPONENT::performRetire(VanadisCircularQueue<VanadisInstruction*>* rob,
                 fprintf(pipelineTrace, "0x%08llx %s\n", rob_front->getInstructionAddress(), rob_front->getInstCode());
             }
 
-				if(UNLIKELY(rob_front->updatesFPFlags())) {
-					rob_front->performFPFlagsUpdate();
-				}
+            if(UNLIKELY(rob_front->updatesFPFlags())) {
+                rob_front->performFPFlagsUpdate();
+            }
 
-            recoverRetiredRegisters(
-                rob_front, int_register_stacks[rob_front->getHWThread()], fp_register_stacks[rob_front->getHWThread()],
-                issue_isa_tables[rob_front->getHWThread()], retire_isa_tables[rob_front->getHWThread()]);
+            #ifdef NI_SIMT_TEST
+            if (rob_front->getInstructionAddress() >= 0x10208 && rob_front->getInstructionAddress() <= 0x10236) {
+                uint16_t warp_id = dynamic_cast<warp_inst*>(rob_front)->get_wid();
+                recoverRetiredRegisters(
+                    rob_front, simt_int_register_stacks[rob_front->getHWThread()][warp_id], 
+                    simt_fp_register_stacks[rob_front->getHWThread()][warp_id],
+                    (*m_warps[rob_front->getHWThread()])[warp_id]->warp_rrt, 
+                    (*m_warps[rob_front->getHWThread()])[warp_id]->warp_recover_rrt);
+            }
+            else {
+            #endif
+                recoverRetiredRegisters(
+                    rob_front, int_register_stacks[rob_front->getHWThread()], fp_register_stacks[rob_front->getHWThread()],
+                    issue_isa_tables[rob_front->getHWThread()], retire_isa_tables[rob_front->getHWThread()]);
+            #ifdef NI_SIMT_TEST
+            }
+            #endif
 
-				if(output->getVerboseLevel() >= 16) {
-					fp_flags.at(rob_front->getHWThread())->print(output);
-			   }
+            if(output->getVerboseLevel() >= 16) {
+                fp_flags.at(rob_front->getHWThread())->print(output);
+            }
 
 
             ins_retired_this_cycle++;
@@ -1230,10 +1249,24 @@ VANADIS_COMPONENT::performRetire(VanadisCircularQueue<VanadisInstruction*>* rob,
 						rob_front->performFPFlagsUpdate();
 					}
 
-                recoverRetiredRegisters(
-                    delay_ins, int_register_stacks[delay_ins->getHWThread()],
-                    fp_register_stacks[delay_ins->getHWThread()], issue_isa_tables[delay_ins->getHWThread()],
-                    retire_isa_tables[delay_ins->getHWThread()]);
+                #ifdef NI_SIMT_TEST
+                if (delay_ins->getInstructionAddress() >= 0x10208 && delay_ins->getInstructionAddress() <= 0x10236) {
+                    uint16_t warp_id = dynamic_cast<warp_inst*>(delay_ins)->get_wid();
+                    recoverRetiredRegisters(
+                        delay_ins, simt_int_register_stacks[delay_ins->getHWThread()][warp_id],
+                        simt_fp_register_stacks[delay_ins->getHWThread()][warp_id], 
+                        (*m_warps[delay_ins->getHWThread()])[warp_id]->warp_rrt,
+                        (*m_warps[delay_ins->getHWThread()])[warp_id]->warp_recover_rrt);
+                }
+                else {
+                #endif
+                    recoverRetiredRegisters(
+                        delay_ins, int_register_stacks[delay_ins->getHWThread()],
+                        fp_register_stacks[delay_ins->getHWThread()], issue_isa_tables[delay_ins->getHWThread()],
+                        retire_isa_tables[delay_ins->getHWThread()]);
+                #ifdef NI_SIMT_TEST
+                }
+                #endif
 
 				if(output->getVerboseLevel() >= 16) {
 					fp_flags.at(rob_front->getHWThread())->print(output);
@@ -1345,6 +1378,12 @@ VANADIS_COMPONENT::mapInstructiontoFunctionalUnit(
     for ( VanadisFunctionalUnit* next_fu : functional_units ) {
         if ( next_fu->isInstructionSlotFree() ) {
             next_fu->setSlotInstruction(ins);
+            if (ins->getInstructionAddress() >= 0x10208 && ins->getInstructionAddress() <= 0x10236) {
+                output->verbose(
+                    CALL_INFO, issue_flag, 0,
+                    "Set slot for ins: %llx\n",
+                    ins->getInstructionAddress());
+            }
             allocated = true;
             break;
         }
@@ -1480,7 +1519,7 @@ VANADIS_COMPONENT::allocateFunctionalUnit_SIMT(warp_inst* ins)
 
     switch ( ins->get_inst()->getInstFuncType() ) {
     case INST_INT_ARITH:
-        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_int_arith);
+        allocated_fu = mapInstructiontoFunctionalUnit(ins, simt_fu_int_arith);
         break;
 
     case INST_LOAD:
@@ -1502,24 +1541,24 @@ VANADIS_COMPONENT::allocateFunctionalUnit_SIMT(warp_inst* ins)
         break;
 
     case INST_FP_ARITH:
-        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_fp_arith);
+        allocated_fu = mapInstructiontoFunctionalUnit(ins, simt_fu_fp_arith);
         break;
 
     case INST_BRANCH:
-        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_branch);
+        allocated_fu = mapInstructiontoFunctionalUnit(ins, simt_fu_branch);
         break;
 
     case INST_INT_DIV:
-        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_int_div);
+        allocated_fu = mapInstructiontoFunctionalUnit(ins, simt_fu_int_div);
         break;
 
     case INST_FP_DIV:
-        allocated_fu = mapInstructiontoFunctionalUnit(ins->get_inst(), simt_fu_fp_div);
+        allocated_fu = mapInstructiontoFunctionalUnit(ins, simt_fu_fp_div);
         break;
 
     case INST_FENCE:
     {
-        VanadisFenceInstruction* fence_ins = dynamic_cast<VanadisFenceInstruction*>(ins->get_inst());
+        VanadisFenceInstruction* fence_ins = dynamic_cast<VanadisFenceInstruction*>(ins);
 
         if ( nullptr == fence_ins ) {
             output->fatal(

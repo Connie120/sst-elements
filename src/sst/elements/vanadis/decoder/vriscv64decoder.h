@@ -29,7 +29,7 @@
 #define VANADIS_RISCV_SIGN12_UPPER_1_32 0xFFFFF000
 #define VANADIS_RISCV_SIGN12_UPPER_1_64 0xFFFFFFFFFFFFF000LL
 
-#define NI_SIMT_TEST
+// #define NI_SIMT_TEST
 
 // Ni: debug purposes
 int decode_flag = 3;

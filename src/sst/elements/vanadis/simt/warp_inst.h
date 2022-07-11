@@ -43,7 +43,10 @@ public:
 
     const char* getInstCode() const override { return _inst->getInstCode(); }
 
-    void execute(SST::Output* output, VanadisRegisterFile* regFile) override {}
+    void execute(SST::Output* output, VanadisRegisterFile* regFile) override {
+        // Performance Simulation Only
+        markExecuted(); 
+    }
 
     // uint16_t getISAIntRegIn_SIMT(const uint16_t index) const { return simt_isa_int_regs_in[index]; }
     // uint16_t getISAIntRegOut_SIMT(const uint16_t index) const { return simt_isa_int_regs_out[index]; }

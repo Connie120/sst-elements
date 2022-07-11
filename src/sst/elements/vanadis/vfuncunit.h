@@ -23,6 +23,8 @@
 
 #include "inst/vinst.h"
 
+#define NI_SIMT_TEST
+
 namespace SST {
 namespace Vanadis {
 
@@ -87,6 +89,10 @@ public:
             }
 
             for (auto q_itr = pending_execute.begin(); q_itr != pending_execute.end(); q_itr++) {
+                VanadisInstruction* inner_ins = q_front->getInstruction();
+                // if (inner_ins && inner_ins->getInstructionAddress() >= 0x10208 && inner_ins->getInstructionAddress() <= 0x10236) {
+                //     printf("In execution: instruction %llx ticks\n", inner_ins->getInstructionAddress());
+                // }
                 (*q_itr)->tick();
             }
         }
