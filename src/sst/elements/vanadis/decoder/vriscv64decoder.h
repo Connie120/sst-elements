@@ -484,6 +484,12 @@ public:
                                 // Ignore the scheduler for now, send to rob in sequence
                                 for (int i = 0; i < decoder_simt_warps->size(); i++) {
                                     warp_inst* warp_next_ins = new warp_inst(next_ins, i, (*decoder_simt_warps)[i]->get_mask());
+                                    if (warp_next_ins->getInstFuncType() == INST_LOAD || 
+                                        warp_next_ins->getInstFuncType() == INST_STORE) {
+                                        for (int j = 0; j < WARP_SIZE; j++) {
+                                            warp_next_ins->memAccessInst.push_back(new warp_inst_memAccess(next_ins, i, j));
+                                        }
+                                    }
                                     thread_rob->push(warp_next_ins);
                                     output->verbose(
                                         CALL_INFO, decode_flag, 0,
