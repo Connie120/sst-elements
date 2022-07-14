@@ -18,19 +18,9 @@ public:
         VanadisInstruction(*inst),
         _inst(inst),
         _wid(wid), 
-        _mask(mask) {
-            // simt_isa_int_regs_in = (count_isa_int_reg_in > 0) ? new uint16_t[count_isa_int_reg_in] : nullptr;
-            // std::memset(isa_int_regs_in, 0, count_isa_int_reg_in);
+        _mask(mask) {}
 
-            // simt_isa_int_regs_out = (count_isa_int_reg_out > 0) ? new uint16_t[count_isa_int_reg_out] : nullptr;
-            // std::memset(isa_int_regs_out, 0, count_isa_int_reg_out);
-
-            // simt_phys_fp_regs_in = (count_phys_fp_reg_in > 0) ? new uint16_t[count_phys_fp_reg_in] : nullptr;
-            // std::memset(phys_fp_regs_in, 0, count_phys_fp_reg_in);
-
-            // simt_phys_fp_regs_out = (count_phys_fp_reg_out > 0) ? new uint16_t[count_phys_fp_reg_out] : nullptr;
-            // std::memset(phys_fp_regs_out, 0, count_phys_fp_reg_out);
-        }
+    std::vector<VanadisInstruction*> memAccessInst;
 
     uint64_t get_wid() { return _wid; }
     active_mask_t get_mask() { return _mask; }
@@ -48,23 +38,35 @@ public:
         markExecuted(); 
     }
 
-    // uint16_t getISAIntRegIn_SIMT(const uint16_t index) const { return simt_isa_int_regs_in[index]; }
-    // uint16_t getISAIntRegOut_SIMT(const uint16_t index) const { return simt_isa_int_regs_out[index]; }
-
-    // uint16_t getISAFPRegIn_SIMT(const uint16_t index) const { return simt_isa_fp_regs_in[index]; }
-    // uint16_t getISAFPRegOut_SIMT(const uint16_t index) const { return simt_isa_fp_regs_out[index]; }
-
 private:
     VanadisInstruction* _inst;
     active_mask_t _mask;
     uint64_t _wid;
+};
 
-    // uint16_t* simt_isa_int_regs_in;
-    // uint16_t* simt_isa_int_regs_out;
+class warp_inst_memAccess : public VanadisInstruction {
+public:
+    warp_inst_memAccess(VanadisInstruction* inst, uint64_t wid, uint16_t tid_in_warp) :
+    VanadisInstruction(*inst),
+    _inst(inst),
+    _wid(wid),
+    _tid_in_warp(tid_in_warp) {}
 
-    // uint16_t* simt_isa_fp_regs_in;
-    // uint16_t* simt_isa_fp_regs_out;
+    VanadisInstruction* get_inst() { return _inst; }
+    uint16_t get_tid() { return _tid_in_warp; }
+    uint64_t get_wid() { return _wid; }
 
+    warp_inst_memAccess* clone() override { return new warp_inst_memAccess(*this); }
+    VanadisFunctionalUnitType getInstFuncType() const override { return _inst->getInstFuncType(); }
+
+    const char* getInstCode() const override { return _inst->getInstCode(); }
+
+    void execute(SST::Output* output, VanadisRegisterFile* regFile) override {}
+
+private:
+    uint16_t _tid_in_warp;
+    VanadisInstruction* _inst;
+    uint64_t _wid;
 };
 
 }  // namespace Vanadis
