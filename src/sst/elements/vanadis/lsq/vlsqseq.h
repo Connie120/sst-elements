@@ -28,6 +28,8 @@
 #include "inst/vinst.h"
 #include "inst/vstore.h"
 
+#define NI_SIMT_TEST_LSQ
+
 using namespace SST::Interfaces;
 
 namespace SST {
@@ -212,6 +214,17 @@ public:
         }
     }
 
+    virtual void push_SIMT(VanadisInstruction* load_me) {
+        if (op_q.size() < max_q_size) {
+            output->verbose(CALL_INFO, 16, 0, "[SIMT] enqueue ins-addr: 0x%llx\n", load_me->getInstructionAddress());
+            op_q.push_back(new VanadisSequentialLoadStoreRecord(load_me));
+        } else {
+            output->fatal(CALL_INFO, -1,
+                          "Error - attempted to enqueue but no room (max: %" PRIu32 ", size: %" PRIu32 ")\n",
+                          (uint32_t)max_q_size, (uint32_t)op_q.size());
+        }
+    }
+
     void printLSQ() {
 		  if( op_q.size() > 0 ) {
         		output->verbose(CALL_INFO, 16, 0, "-- LSQ Seq / Size: %" PRIu64 " ----------------\n", (uint64_t)op_q.size());
@@ -255,7 +268,20 @@ public:
             VanadisRegisterFile* reg_file = registerFiles->at(next_item->getInstruction()->getHWThread());
 
             if (next_item->isLoad()) {
-                VanadisLoadInstruction* load_ins = dynamic_cast<VanadisLoadInstruction*>(next_item->getInstruction());
+                VanadisLoadInstruction* load_ins;
+                #ifdef NI_SIMT_TEST_LSQ
+                warp_inst_memAccess* simt_memAccess_ins;
+                if (next_item->getInstruction()->getInstructionAddress() >= 0x10208 && 
+                    next_item->getInstruction()->getInstructionAddress() <= 0x10236) {
+                    warp_inst_memAccess* simt_memAccess_ins = dynamic_cast<warp_inst_memAccess*>(next_item->getInstruction());
+                    load_ins = dynamic_cast<VanadisLoadInstruction*>(simt_memAccess_ins->get_inst());
+                }
+                else {
+                #endif
+                    load_ins = dynamic_cast<VanadisLoadInstruction*>(next_item->getInstruction());
+                #ifdef NI_SIMT_TEST_LSQ
+                }
+                #endif
 
                 // we are either allowed to issue the load because speculated loads are
                 // OK or we don't permit speculated loads but now we are at the front of
@@ -265,7 +291,21 @@ public:
                     uint16_t load_width = 0;
                     std::string load_type = "";
 
-                    load_ins->computeLoadAddress(output, reg_file, &load_addr, &load_width);
+                    #ifdef NI_SIMT_TEST_LSQ
+                    if (load_ins->getInstructionAddress() >= 0x10208 && load_ins->getInstructionAddress() <= 0x10236) {
+                        if (!simt_memAccess_ins) {
+                            printf("NULL simt_memAccess_ins in lsq\n");
+                        }
+                        load_ins->computeLoadAddress_SIMT(output, reg_file, &load_addr, &load_width, 
+                                                        simt_memAccess_ins->get_wid(), simt_memAccess_ins->get_tid());
+                        printf("SIMT LOAD Address 0x%llx for wid: %u, tid: %u\n", load_addr, simt_memAccess_ins->get_wid(), simt_memAccess_ins->get_tid());
+                    }
+                    else {
+                    #endif
+                        load_ins->computeLoadAddress(output, reg_file, &load_addr, &load_width);
+                    #ifdef NI_SIMT_TEST_LSQ
+                    }
+                    #endif
 
                     output->verbose(CALL_INFO, 8, 0, "--> issue load for 0x%llx width: %" PRIu16 " bytes / ins: 0x%llx\n", load_addr,
                                     load_width, load_ins->getInstructionAddress());
@@ -325,8 +365,20 @@ public:
                     next_item->markOperationIssued();
                 }
             } else if (next_item->isStore()) {
-                VanadisStoreInstruction* store_ins
-                    = dynamic_cast<VanadisStoreInstruction*>(next_item->getInstruction());
+                VanadisStoreInstruction* store_ins;
+                #ifdef NI_SIMT_TEST_LSQ
+                warp_inst_memAccess* simt_memAccess_ins;
+                if (next_item->getInstruction()->getInstructionAddress() >= 0x10208 && 
+                    next_item->getInstruction()->getInstructionAddress() <= 0x10236) {
+                    warp_inst_memAccess* simt_memAccess_ins = dynamic_cast<warp_inst_memAccess*>(next_item->getInstruction());
+                    store_ins = dynamic_cast<VanadisStoreInstruction*>(simt_memAccess_ins->get_inst());
+                }
+                else {
+                #endif
+                    store_ins = dynamic_cast<VanadisStoreInstruction*>(next_item->getInstruction());
+                #ifdef NI_SIMT_TEST_LSQ
+                }
+                #endif
 
                 // Stores must be at the front of the ROB to be executed or else we will
                 // potentially violate correct execution in OoO pipelines
@@ -354,7 +406,19 @@ public:
                     } break;
                     }
 
-                    store_ins->computeStoreAddress(output, reg_file, &store_addr, &store_width);
+                   #ifdef NI_SIMT_TEST_LSQ
+                    if (store_ins->getInstructionAddress() >= 0x10208 && store_ins->getInstructionAddress() <= 0x10236) {
+                        store_ins->computeStoreAddress_SIMT(output, reg_file, &store_addr, &store_width, 
+                                                        simt_memAccess_ins->get_wid(), simt_memAccess_ins->get_tid());
+                        printf("SIMT STORE Address 0x%llx for wid: %u, tid: %u\n", store_addr, simt_memAccess_ins->get_wid(), simt_memAccess_ins->get_tid());
+                    }
+                    else {
+                    #endif
+                        store_ins->computeStoreAddress(output, reg_file, &store_addr, &store_width);
+                    #ifdef NI_SIMT_TEST_LSQ
+                    }
+                    #endif
+                    
                     store_addr = store_addr & address_mask;
 
                     for (uint16_t i = 0; i < store_width; ++i) {

@@ -86,16 +86,16 @@ public:
         return fp_reg_storage + (fp_reg_width * reg);
     }
 
-    char* getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    char* getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id, const uint16_t tid)
     {
         assert(reg < count_int_regs);
-        return simt_int_reg_storage[warp_id] + (int_reg_width * WARP_SIZE * reg);
+        return simt_int_reg_storage[warp_id] + (int_reg_width * WARP_SIZE * reg) + (int_reg_width * tid);
     }
 
-    char* getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    char* getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id, const uint16_t tid)
     {
         assert(reg < count_fp_regs);
-        return simt_fp_reg_storage[warp_id] + (fp_reg_width * WARP_SIZE * reg);
+        return simt_fp_reg_storage[warp_id] + (fp_reg_width * WARP_SIZE * reg) + (int_reg_width * tid);
     }
 
     template <typename T>
@@ -124,14 +124,14 @@ public:
     }
 
     template <typename T>
-    T getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    T getIntReg_SIMT(const uint16_t reg, const uint16_t warp_id, const uint16_t tid)
     {
         assert(reg < count_int_regs);
 
         if ( reg != decoder_opts->getRegisterIgnoreWrites() ) {
             char* reg_start   = &simt_int_reg_storage[warp_id][reg * WARP_SIZE * int_reg_width];
             T*    reg_start_T = (T*)reg_start;
-            return *(reg_start_T);
+            return reg_start_T[tid];
         }
         else {
             return T();
@@ -139,13 +139,13 @@ public:
     }
 
     template <typename T>
-    T getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id)
+    T getFPReg_SIMT(const uint16_t reg, const uint16_t warp_id, const uint16_t tid)
     {
         assert(reg < count_fp_regs);
 
         char* reg_start   = &simt_fp_reg_storage[warp_id][reg * WARP_SIZE * fp_reg_width];
         T*    reg_start_T = (T*)reg_start;
-        return *(reg_start_T);
+        return reg_start_T[tid];
     }
 
     template <typename T>

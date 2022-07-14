@@ -78,6 +78,8 @@ public:
     virtual void push(VanadisStoreInstruction* store_me) = 0;
     virtual void push(VanadisLoadInstruction* load_me) = 0;
 
+    virtual void push_SIMT(VanadisInstruction* warp_memAccess) {}
+
     virtual void tick(uint64_t cycle) = 0;
 
     virtual void clearLSQByThreadID(const uint32_t thread) = 0;

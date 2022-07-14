@@ -1526,7 +1526,9 @@ VANADIS_COMPONENT::allocateFunctionalUnit_SIMT(warp_inst* ins)
     if ( !lsq->loadFull() ) {
         stat_loads_issued->addData(1);
 
-        lsq->push((VanadisLoadInstruction*)ins->get_inst());
+        for (int i = 0; i < ins->memAccessInst.size(); i++) {
+            lsq->push_SIMT(ins->memAccessInst[i]);
+        }
         allocated_fu = true;
     }
     break;
@@ -1535,7 +1537,9 @@ VANADIS_COMPONENT::allocateFunctionalUnit_SIMT(warp_inst* ins)
         if ( !lsq->storeFull() ) {
             stat_stores_issued->addData(1);
 
-            lsq->push((VanadisStoreInstruction*)ins->get_inst());
+            for (int i = 0; i < ins->memAccessInst.size(); i++) {
+                lsq->push_SIMT(ins->memAccessInst[i]);
+            }
             allocated_fu = true;
         }
         break;
