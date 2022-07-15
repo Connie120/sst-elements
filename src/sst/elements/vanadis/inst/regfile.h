@@ -101,6 +101,9 @@ public:
     template <typename T>
     T getIntReg(const uint16_t reg)
     {
+        if (reg >= count_int_regs) {
+            printf("In getIntReg, reg: %u, count_int_regs: %u\n");
+        }
         assert(reg < count_int_regs);
 
         if ( reg != decoder_opts->getRegisterIgnoreWrites() ) {

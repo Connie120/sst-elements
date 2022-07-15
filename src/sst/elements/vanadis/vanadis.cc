@@ -1356,7 +1356,16 @@ VANADIS_COMPONENT::performRetire(VanadisCircularQueue<VanadisInstruction*>* rob,
             }
         }
         else {
-            if ( !rob_front->checkFrontOfROB() ) { rob_front->markFrontOfROB(); }
+            if ( !rob_front->checkFrontOfROB() ) { 
+                if (rob_front->getInstructionAddress() <= 0x10208 && rob_front->getInstructionAddress() >= 0x10236 && 
+                    (rob_front->getInstFuncType() == INST_LOAD || rob_front->getInstFuncType() == INST_STORE)) {
+                    warp_inst* func_instr = dynamic_cast<warp_inst*>(rob_front);
+                    for ( int j = 0; j < func_instr->memAccessInst.size(); j++) {
+                        /*dynamic_cast<warp_inst_memAccess*>*/(func_instr->memAccessInst[j])->markFrontOfROB();
+                    }
+                }
+                rob_front->markFrontOfROB(); 
+            }
             else {
                 // Return 2 because instruction is front of ROB but has not executed and
                 // so we cannot make progress any more this cycle
@@ -1414,8 +1423,10 @@ VANADIS_COMPONENT::allocateFunctionalUnit(VanadisInstruction* ins)
             //				if( ins->endsMicroOpGroup() ) {
             stat_loads_issued->addData(1);
             //				}
-
+            
             lsq->push((VanadisLoadInstruction*)ins);
+            // printf("In allocateFunctionalUnit: ins reg: %u\n", ins->getPhysIntRegIn(0));
+
             allocated_fu = true;
         }
         break;
@@ -2262,9 +2273,6 @@ VANADIS_COMPONENT::assignRegistersToInstruction(
 
             ins->setPhysIntRegOut(i, out_reg);
             isa_table->incIntWrite(ins_isa_reg);
-            if (ins_isa_reg == 8) {
-                printf("increase reg s0 pending write\n");
-            }
         }
 
         // Set current ISA registers required for output

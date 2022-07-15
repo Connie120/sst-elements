@@ -30,6 +30,9 @@
 
 #define NI_SIMT_TEST_LSQ
 
+// Ni: Test purposes
+int lsq_flag = 2;
+
 using namespace SST::Interfaces;
 
 namespace SST {
@@ -60,6 +63,8 @@ public:
         opAddr = 0;
     }
 
+    VanadisSequentialLoadStoreRecord* clone() { return new VanadisSequentialLoadStoreRecord(*this); }
+
     bool isOperationIssued() { return issued; }
 
     void markOperationIssued() { issued = true; }
@@ -79,7 +84,7 @@ public:
     void setOperationAddress(const uint64_t newAddr) { opAddr = newAddr; }
 
     void print(SST::Output* output) {
-        output->verbose(CALL_INFO, 16, 0, "-> type: %s / ins: 0x%llx / issued: %c\n", isStore() ? "STORE" : "LOAD ",
+        output->verbose(CALL_INFO, lsq_flag, 0, "-> type: %s / ins: 0x%llx / issued: %c\n", isStore() ? "STORE" : "LOAD ",
                         ins->getInstructionAddress(), issued ? 'Y' : 'N');
     }
 
@@ -227,7 +232,7 @@ public:
 
     void printLSQ() {
 		  if( op_q.size() > 0 ) {
-        		output->verbose(CALL_INFO, 16, 0, "-- LSQ Seq / Size: %" PRIu64 " ----------------\n", (uint64_t)op_q.size());
+        		output->verbose(CALL_INFO, lsq_flag, 0, "-- LSQ Seq / Size: %" PRIu64 " ----------------\n", (uint64_t)op_q.size());
 
       	  for (auto op_q_itr = op_q.begin(); op_q_itr != op_q.end(); op_q_itr++) {
    	         (*op_q_itr)->print(output);
@@ -243,7 +248,7 @@ public:
 				return;
 		  }
 
-        if (output->getVerboseLevel() >= 16) {
+        if (output->getVerboseLevel() >= lsq_flag) {
             printLSQ();
         }
 
@@ -275,6 +280,8 @@ public:
                     next_item->getInstruction()->getInstructionAddress() <= 0x10236) {
                     warp_inst_memAccess* simt_memAccess_ins = dynamic_cast<warp_inst_memAccess*>(next_item->getInstruction());
                     load_ins = dynamic_cast<VanadisLoadInstruction*>(simt_memAccess_ins->get_inst());
+                    printf("[SIMT] Converted LOAD instruction 0x%llx, warp %u\n", load_ins->getInstructionAddress(), 
+                            simt_memAccess_ins->get_wid());
                 }
                 else {
                 #endif
@@ -290,6 +297,7 @@ public:
                     uint64_t load_addr = 0;
                     uint16_t load_width = 0;
                     std::string load_type = "";
+                    printf("load_ins 0x%llx is front of rob\n", load_ins->getInstructionAddress());
 
                     #ifdef NI_SIMT_TEST_LSQ
                     if (load_ins->getInstructionAddress() >= 0x10208 && load_ins->getInstructionAddress() <= 0x10236) {
@@ -367,11 +375,13 @@ public:
             } else if (next_item->isStore()) {
                 VanadisStoreInstruction* store_ins;
                 #ifdef NI_SIMT_TEST_LSQ
-                warp_inst_memAccess* simt_memAccess_ins;
+                warp_inst_memAccess* simt_memAccess_ins = nullptr;
                 if (next_item->getInstruction()->getInstructionAddress() >= 0x10208 && 
                     next_item->getInstruction()->getInstructionAddress() <= 0x10236) {
-                    warp_inst_memAccess* simt_memAccess_ins = dynamic_cast<warp_inst_memAccess*>(next_item->getInstruction());
+                    simt_memAccess_ins = dynamic_cast<warp_inst_memAccess*>(next_item->getInstruction());
                     store_ins = dynamic_cast<VanadisStoreInstruction*>(simt_memAccess_ins->get_inst());
+                    printf("[SIMT] Converted STORE instruction 0x%llx, warp %u\n", store_ins->getInstructionAddress(), 
+                            simt_memAccess_ins->get_wid());
                 }
                 else {
                 #endif
@@ -379,6 +389,11 @@ public:
                 #ifdef NI_SIMT_TEST_LSQ
                 }
                 #endif
+
+                if (simt_memAccess_ins != nullptr) {
+                    printf("simt_memAccess_ins 0x%llx is front of rob %s\n", simt_memAccess_ins->getInstructionAddress(), 
+                    simt_memAccess_ins->checkFrontOfROB() ? "yes" : "no");
+                }
 
                 // Stores must be at the front of the ROB to be executed or else we will
                 // potentially violate correct execution in OoO pipelines
@@ -405,6 +420,7 @@ public:
                         reg_ptr = reg_file->getFPReg(value_reg);
                     } break;
                     }
+                    printf("store_ins 0x%llx is front of rob\n", store_ins->getInstructionAddress());
 
                    #ifdef NI_SIMT_TEST_LSQ
                     if (store_ins->getInstructionAddress() >= 0x10208 && store_ins->getInstructionAddress() <= 0x10236) {
@@ -418,7 +434,7 @@ public:
                     #ifdef NI_SIMT_TEST_LSQ
                     }
                     #endif
-                    
+
                     store_addr = store_addr & address_mask;
 
                     for (uint16_t i = 0; i < store_width; ++i) {
@@ -483,6 +499,13 @@ public:
                         next_item->setOperationAddress(store_addr);
                     }
                     next_item->markOperationIssued();
+
+                    if (store_ins->getTransactionType() == MEM_TRANSACTION_LOCK || 
+                        store_ins->getTransactionType() == MEM_TRANSACTION_NONE) {
+                        store_issued_q.push_back(next_item->clone());
+                        delete(next_item);
+                        op_q.erase(op_q_itr);
+                    }
 
                     //op_q.erase(op_q_itr);
                 }
@@ -718,23 +741,43 @@ public:
                         (uint32_t)ev->size);
 
             bool processed = false;
-            for (auto op_q_itr = lsq->op_q.begin(); op_q_itr != lsq->op_q.end();) {
+            // for (auto op_q_itr = lsq->op_q.begin(); op_q_itr != lsq->op_q.end();) {
+            //     // is the operation issued to the memory system and do we match ID
+            //     if ((*op_q_itr)->isOperationIssued() && (ev->getID() == (*op_q_itr)->getRequestID())) {
+
+            //         out->verbose(CALL_INFO, 8, 0, "matched a store record (addr: 0x%llx)\n",
+            //                         (*op_q_itr)->getInstruction()->getInstructionAddress());
+
+            //         // TODO assert (!(*op_q_itr)->isLoad()) ?
+
+            //         // Clean up
+            //         delete (*op_q_itr);
+            //         lsq->op_q.erase(op_q_itr);
+            //         processed = true;
+
+            //         break;
+            //     } else {
+            //         op_q_itr++;
+            //     }
+            // }
+
+            for (auto st_q_itr = lsq->store_issued_q.begin(); st_q_itr != lsq->store_issued_q.end();) {
                 // is the operation issued to the memory system and do we match ID
-                if ((*op_q_itr)->isOperationIssued() && (ev->getID() == (*op_q_itr)->getRequestID())) {
+                if ((*st_q_itr)->isOperationIssued() && (ev->getID() == (*st_q_itr)->getRequestID())) {
 
                     out->verbose(CALL_INFO, 8, 0, "matched a store record (addr: 0x%llx)\n",
-                                    (*op_q_itr)->getInstruction()->getInstructionAddress());
+                                    (*st_q_itr)->getInstruction()->getInstructionAddress());
 
                     // TODO assert (!(*op_q_itr)->isLoad()) ?
 
                     // Clean up
-                    delete (*op_q_itr);
-                    lsq->op_q.erase(op_q_itr);
+                    delete (*st_q_itr);
+                    lsq->store_issued_q.erase(st_q_itr);
                     processed = true;
 
                     break;
                 } else {
-                    op_q_itr++;
+                    st_q_itr++;
                 }
             }
 
@@ -861,6 +904,8 @@ protected:
 
     std::deque<VanadisSequentialLoadStoreRecord*> op_q;
     std::unordered_set<VanadisSequentialLoadStoreSCRecord*> sc_inflight;
+
+    std::deque<VanadisSequentialLoadStoreRecord*> store_issued_q;
 
     StandardMem* memInterface;
     StandardMemHandlers* std_mem_handlers;
