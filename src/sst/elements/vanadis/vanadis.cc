@@ -25,10 +25,14 @@
 #include <sst/core/output.h>
 #include <vector>
 
+#include "simt/warp_inst.h"
+#include "simt/thread.h"
+
 using namespace SST::Vanadis;
+using namespace std;
 
 VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params) : Component(id), current_cycle(0),
-    m_curRetireHwThread(0), m_curIssueHwThread(0)
+    m_curRetireHwThread(0), m_curIssueHwThread(0), arrived_thread(0)
 {
 
     instPrintBuffer = new char[1024];
@@ -171,12 +175,15 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
             CALL_INFO, 8, 0, "Reorder buffer set to %" PRIu32 " entries, these are shared by all threads.\n",
             rob_count);
         rob.push_back(new VanadisCircularQueue<VanadisInstruction*>(rob_count));
+        v_warp_rob.push_back(new VanadisCircularQueue<warp_inst*>(rob_count));
+        
         // WE NEED ISA INTEGER AND FP COUNTS HERE NOT ZEROS
         issue_isa_tables.push_back(new VanadisISATable( "issue",
             thread_decoders[i]->getDecoderOptions(), thread_decoders[i]->countISAIntReg(),
             thread_decoders[i]->countISAFPReg()));
 
         thread_decoders[i]->setThreadROB(rob[i]);
+        thread_decoders[i]->setSIMTROB(v_warp_rob[i]);
 
         for ( uint16_t j = 0; j < thread_decoders[i]->countISAIntReg(); ++j ) {
             issue_isa_tables[i]->setIntPhysReg(j, int_register_stack->pop());
@@ -192,6 +199,29 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         retire_isa_tables[i]->reset(issue_isa_tables[i]);
 
         halted_masks[i] = true;
+
+        simt_threads.push_back(new thread_info(i, 0, i/WARP_SIZE)); // TODO: what's the starting pc?
+    }
+
+    int num_warps = (hw_threads % WARP_SIZE) ? (hw_threads / WARP_SIZE + 1) : (hw_threads / WARP_SIZE);
+    for ( uint32_t i = 0; i < num_warps; ++i ) {
+        bitset<WARP_SIZE> mask;
+        if (hw_threads / WARP_SIZE > i) {
+            mask = bitset<WARP_SIZE>(0xffffffff);
+        }
+        else {
+            int num_threads = hw_threads % WARP_SIZE;
+            uint32_t temp = 1;
+            for (int j = 1; j < num_threads; j++) {
+                temp = (temp << 1) + 1;
+            }
+            mask = bitset<WARP_SIZE>(temp);
+        }
+        m_warps.push_back(new warp(i, mask, new VanadisISATable( "issue",
+            thread_decoders[0]->getDecoderOptions(), thread_decoders[0]->countISAIntReg(),
+            thread_decoders[0]->countISAFPReg()), new VanadisISATable( "retire",
+            thread_decoders[0]->getDecoderOptions(), thread_decoders[0]->countISAIntReg(),
+            thread_decoders[0]->countISAFPReg()))); // TODO: Add rr tables and reset, check the # regs used per thread in config file
     }
 
     delete[] decoder_name;
@@ -578,7 +608,8 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, int hwThr, uint32_t& rob_s
                                 output->verbose(
                                     CALL_INFO, 8, VANADIS_DBG_ISSUE_FLG, "%d: ----> Issued for: %s / 0x%" PRI_ADDR " / status: %d\n",
                                     ins->getHWThread(), instPrintBuffer, ins->getInstructionAddress(), status);
-                                if ( print_rob ) {
+                                if ( print_rob && i != 0) {
+                                    printf("issue rob thr %u\n", i);
                                     printRob(i,rob[i]);
                                 }
                             }
@@ -1210,6 +1241,12 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
         should_process = should_process | halted_masks[i];
     }
 
+    if(output_verbosity >= 2) {
+        output->verbose(
+            CALL_INFO, 2, 0, "============================ Cycle %12" PRIu64 " ============================\n",
+            current_cycle);
+    }
+
 #ifdef VANADIS_BUILD_DEBUG
     if(output_verbosity >= 2) {
         output->verbose(
@@ -1269,6 +1306,7 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
         // we found a unblocked hardware thread
         if ( cnt ) {
             auto thr = m_curRetireHwThread;
+            // printf("retire rob thr %u\n", i);
             rc[thr] = performRetire(thr, rob[thr], cycle);
 
             ++m_curRetireHwThread;
@@ -2050,7 +2088,12 @@ void VANADIS_COMPONENT::startThreadClone( VanadisStartThreadCloneReq* req )
     thr_decoder->setThreadLocalStoragePointer( req->getTlsAddr() );
     thr_decoder->setThreadPointer( output, isa_table, reg_file, req->getTlsAddr() );
 
-    halted_masks[hw_thr]            = false;
+    arrived_thread++;
+    if (arrived_thread == (hw_threads - 1)) {
+        for (int i = 1; i < hw_threads; i++) {
+            halted_masks[i]            = false;
+        }
+    }
     handleMisspeculate( hw_thr, req->getInstPtr() );
 }
 

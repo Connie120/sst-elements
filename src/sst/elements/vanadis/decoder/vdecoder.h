@@ -34,6 +34,8 @@
 #include <sst/core/interfaces/stdMem.h>
 #include <sst/core/subcomponent.h>
 
+#include "simt/warp_inst.h"
+
 #define VANADIS_DECODER_ELI_STATISTICS                                                                \
     { "uop_cache_hit", "Count number of times the instruction micro-op cache is hit", "hits", 1 },    \
         { "predecode_cache_hit",                                                                      \
@@ -221,6 +223,7 @@ public:
     // decoded_q; }
 
     virtual void setThreadROB(VanadisCircularQueue<VanadisInstruction*>* thr_rob) { thread_rob = thr_rob; }
+    virtual void setSIMTROB(VanadisCircularQueue<warp_inst*>* thr_rob) { warp_rob = thr_rob; }
 
     void     setCore(const uint32_t num ) { core = num; }
     uint32_t getCore() const { return core; }
@@ -246,6 +249,7 @@ protected:
 
     bool                                       wantDelegatedLoad;
     VanadisCircularQueue<VanadisInstruction*>* thread_rob;
+    VanadisCircularQueue<warp_inst*>* warp_rob;
 
     // VanadisCircularQueue<VanadisInstruction*>* decoded_q;
 

@@ -40,6 +40,10 @@
 #include <sst/core/output.h>
 #include <sst/core/params.h>
 
+#include "simt/warp_inst.h"
+#include "simt/warp.h"
+
+
 namespace SST {
 namespace Vanadis {
 
@@ -205,9 +209,12 @@ public:
     void setHalt(uint32_t thr, int64_t halt_code);
     void startThread(int thr, uint64_t stackStart, uint64_t instructionPointer );
     void startThreadFork( VanadisStartThreadForkReq* req );
-    void startThreadClone( VanadisStartThreadCloneReq* req );
+    void startThreadClone( VanadisStartThreadCloneReq* req);
     void getThreadState( VanadisGetThreadStateReq* req );
     void dumpRegs( VanadisDumpRegsReq* req );
+
+    // SIMT: Only release simt threads once all threads have been cloned
+    uint32_t arrived_thread;
 
 private:
 #ifdef VANADIS_BUILD_DEBUG
@@ -285,8 +292,13 @@ private:
     uint32_t m_curIssueHwThread;
 
     std::vector<VanadisCircularQueue<VanadisInstruction*>*> rob;
+    std::vector<VanadisCircularQueue<warp_inst*>*> v_warp_rob;
     std::vector<VanadisDecoder*>                            thread_decoders;
     std::vector<const VanadisDecoderOptions*>               isa_options;
+
+    // SIMT structures
+    std::vector<thread_info*> simt_threads;
+    std::vector<warp*> m_warps;
 
     std::vector<VanadisFunctionalUnit*> fu_int_arith;
     std::vector<VanadisFunctionalUnit*> fu_int_div;

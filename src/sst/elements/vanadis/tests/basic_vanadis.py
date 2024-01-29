@@ -61,10 +61,10 @@ sst.setProgramOption("stop-at", "0 ns")
 sst.setStatisticLoadLevel(4)
 sst.setStatisticOutput("sst.statOutputConsole")
 
-full_exe_name = os.getenv("VANADIS_EXE", "./small/" + testDir + "/" + exe +  "/" + isa + "/" + exe )
+full_exe_name = os.getenv("VANADIS_EXE", "./riscv/pthread_musl" )
 exe_name= full_exe_name.split("/")[-1]
 
-verbosity = int(os.getenv("VANADIS_VERBOSE", 0))
+verbosity = int(os.getenv("VANADIS_VERBOSE", 8))
 os_verbosity = os.getenv("VANADIS_OS_VERBOSE", verbosity)
 pipe_trace_file = os.getenv("VANADIS_PIPE_TRACE", "")
 lsq_ld_entries = os.getenv("VANADIS_LSQ_LD_ENTRIES", 16)
@@ -84,14 +84,14 @@ branch_arith_cycles = int(os.getenv("VANADIS_BRANCH_ARITH_CYCLES", 2))
 cpu_clock = os.getenv("VANADIS_CPU_CLOCK", "2.3GHz")
 
 numCpus = int(os.getenv("VANADIS_NUM_CORES", 1))
-numThreads = int(os.getenv("VANADIS_NUM_HW_THREADS", 1))
+numThreads = int(os.getenv("VANADIS_NUM_HW_THREADS", 5))
 
 vanadis_cpu_type = "vanadis."
 vanadis_cpu_type += os.getenv("VANADIS_CPU_ELEMENT_NAME","dbg_VanadisCPU")
 
 if (verbosity > 0):
     print("Verbosity: " + str(verbosity) + " -> loading Vanadis CPU type: " + vanadis_cpu_type)
-    print("Auto-clock syscalls: " + str(auto_clock_sys))
+    #print("Auto-clock syscalls: " + str(auto_clock_sys))
 # vanadis_cpu_type = "vanadisdbg.VanadisCPU"
 
 app_args = os.getenv("VANADIS_EXE_ARGS", "")
@@ -259,7 +259,7 @@ cpuParams = {
     "pause_when_retire_address" : os.getenv("VANADIS_HALT_AT_ADDRESS", 0),
     "start_verbose_when_issue_address": dbgAddr,
     "stop_verbose_when_retire_address": stopDbg,
-    "print_rob" : False,
+    "print_rob" : True,
 }
 
 lsqParams = {
