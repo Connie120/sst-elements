@@ -107,7 +107,10 @@ public:
         uint64_t call_link_value = getLinkReg();
 
         flushLSQ = false;
-        const uint32_t hw_thr = syscallIns->getHWThread();
+        uint32_t hw_thr = syscallIns->getHWThread();
+        if (hw_thr == 5) {
+            hw_thr = 1;
+        }
 
         const uint64_t os_code = getOsCode();
 

@@ -307,9 +307,11 @@ bool MESIL1::handleGetSX(MemEvent* event, bool inMSHR) {
     MemEventStatus status = MemEventStatus::OK;
     uint64_t sendTime = 0;
     vector<uint8_t> data;
+    printf("Handle GetSX state: ");
 
     switch (state) {
         case I:
+            printf("I\n");
             status = processCacheMiss(event, line, inMSHR);
 
             if (status == MemEventStatus::OK) {
@@ -334,6 +336,7 @@ bool MESIL1::handleGetSX(MemEvent* event, bool inMSHR) {
             }
             break;
         case S:
+            printf("S\n");
             status = processCacheMiss(event, line, inMSHR); // Just acquire an MSHR entry
             if (status == MemEventStatus::OK) {
                 if (!mshr_->getProfiled(addr)) {
@@ -356,6 +359,7 @@ bool MESIL1::handleGetSX(MemEvent* event, bool inMSHR) {
             break;
         case E:
         case M:
+            printf("E/M\n");
             recordPrefetchResult(line, statPrefetchHit);
             if (!inMSHR || !mshr_->getProfiled(addr)) {
                 notifyListenerOfAccess(event, NotifyAccessType::READ, NotifyResultType::HIT);
@@ -377,6 +381,7 @@ bool MESIL1::handleGetSX(MemEvent* event, bool inMSHR) {
                 eventDI.reason = "hit";
             break;
         default:
+            printf("None\n");
             if (!inMSHR) {
                 status = allocateMSHR(event, false);
             } else if (is_debug_addr(addr)) {

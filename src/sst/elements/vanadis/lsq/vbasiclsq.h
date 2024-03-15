@@ -312,6 +312,12 @@ protected:
             const uint32_t hw_thr     = load_ins->getHWThread();
 
             if ( ev->getFail() || ev->vAddr < 64) {
+                if (ev->getFail()) {
+                    printf("getFail\n");
+                }
+                else {
+                    printf("virtual address less than 64\n");
+                }
                 load_ins->flagError();
             }
 
@@ -464,6 +470,10 @@ protected:
             // this was not a standard store OR was removed by a branch mis-predict but we need to find
             // out now
             int thr = ev->tid;
+            // Comment out this if in SMT
+            if (thr == 1) {
+                thr = 5;
+            }
             if(0 == lsq->stores_pending[thr].size()) {
                 // no other pending stores so this request is free and can move on
                 delete ev;
@@ -669,8 +679,14 @@ protected:
                     store_ins->getPhysFPRegIn(0) : store_ins->getPhysIntRegIn(1), store_ins->getRegisterOffset(), &payload[0], store_width_left,
                     store_ins->getValueRegisterType() == STORE_FP_REGISTER);
 
-                store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
+                if (store_ins->getHWThread() == (hw_threads-1)) {
+                    store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
+                    false, 0, store_address, store_ins->getInstructionAddress(), 1);
+                }
+                else {
+                    store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
                     false, 0, store_address, store_ins->getInstructionAddress(), store_ins->getHWThread());
+                }
 
                 std_stores_in_flight.insert(store_req->getID());
                 memInterface->send(store_req);
@@ -702,9 +718,15 @@ protected:
 
                     output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_STORE_FLG, "}\n");
                 }
-
-                store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
+                if (store_ins->getHWThread() == (hw_threads-1)) {
+                    store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
+                    false, 0, store_address, store_ins->getInstructionAddress(), 1);
+                }
+                else {
+                    store_req = new StandardMem::Write(store_address & address_mask, payload.size(), payload,
                     false, 0, store_address, store_ins->getInstructionAddress(), store_ins->getHWThread());
+                }
+
                 std_stores_in_flight.insert(store_req->getID());
                 memInterface->send(store_req);
 
@@ -723,8 +745,14 @@ protected:
                 output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_STORE_FLG, "---> [memory-transaction]: LLSC-store store-at: 0x%" PRI_ADDR " width: %" PRIu64 "\n",
                     store_address, store_width);
 
-                store_req = new StandardMem::StoreConditional(store_address & address_mask, payload.size(), payload,
+                if (store_ins->getHWThread() == (hw_threads-1)) {
+                    store_req = new StandardMem::StoreConditional(store_address & address_mask, payload.size(), payload,
+                            0, store_address, store_ins->getInstructionAddress(), 1);
+                }
+                else {
+                    store_req = new StandardMem::StoreConditional(store_address & address_mask, payload.size(), payload,
                             0, store_address, store_ins->getInstructionAddress(), store_ins->getHWThread() );
+                }
             }
         } break;
         case MEM_TRANSACTION_LOCK:
@@ -735,8 +763,14 @@ protected:
                 output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_STORE_FLG, "---> [memory-transaction]: LOCK-store store-at: 0x%" PRI_ADDR " width: %" PRIu64 "\n",
                     store_address, store_width);
 
-                store_req = new StandardMem::WriteUnlock(store_address & address_mask, payload.size(), payload,
-                            0, store_address, store_ins->getInstructionAddress(), store_ins->getHWThread());
+                if (store_ins->getHWThread() == (hw_threads-1)) {
+                    store_req = new StandardMem::WriteUnlock(store_address & address_mask, payload.size(), payload,
+                                0, store_address, store_ins->getInstructionAddress(), 1);
+                }
+                else {
+                    store_req = new StandardMem::WriteUnlock(store_address & address_mask, payload.size(), payload,
+                                0, store_address, store_ins->getInstructionAddress(), store_ins->getHWThread());
+                }
             }
         } break;
         }
@@ -820,12 +854,20 @@ protected:
                         if(output->getVerboseLevel() >= 16) {
                             output->verbose(CALL_INFO, 16, 0, "---> address resolves to zero, flag as error and do not generate event.\n");
                         }
-
                         load_ins->flagError();
                         load_req = nullptr;
                     } else {
-                        load_req = new StandardMem::Read(load_address & address_mask, load_width, 0,
-                            load_address, load_ins->getInstructionAddress(), load_ins->getHWThread());
+                        // printf("hw_threads: %u\n", hw_threads);
+                        // printf("load tid: %u\n", load_ins->getHWThread());
+                        if (load_ins->getHWThread() == (hw_threads-1)) {
+                            printf("lsq tid: %u\n", load_ins->getHWThread());
+                            load_req = new StandardMem::LoadLink(load_address & address_mask, load_width, 0,
+                                        load_address, load_ins->getInstructionAddress(), 1);
+                        }
+                        else {
+                            load_req = new StandardMem::LoadLink(load_address & address_mask, load_width, 0,
+                                            load_address, load_ins->getInstructionAddress(), load_ins->getHWThread());
+                        }
                     }
                 }
             } break;
@@ -833,12 +875,20 @@ protected:
             {
                 if(UNLIKELY(needs_split)) {
                     output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_LOAD_FLG, "---> load is marked LLSC but it requires a cache line split, generates an error\n");
+                    printf("---> load is marked LLSC but it requires a cache line split, generates an error\n");
                     load_ins->flagError();
                 } else {
                     output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_LOAD_FLG, "---> [memory-transaction]: LLSC-load (not split) load-at: 0x%" PRI_ADDR " width: %" PRIu64 "\n",
                         load_address, load_width);
-                    load_req = new StandardMem::LoadLink(load_address & address_mask, load_width, 0,
+                    if (load_ins->getHWThread() == (hw_threads-1)) {
+                        printf("lsq tid: %u\n", load_ins->getHWThread());
+                        load_req = new StandardMem::LoadLink(load_address & address_mask, load_width, 0,
+                                    load_address, load_ins->getInstructionAddress(), 1);
+                    }
+                    else {
+                        load_req = new StandardMem::LoadLink(load_address & address_mask, load_width, 0,
                                         load_address, load_ins->getInstructionAddress(), load_ins->getHWThread());
+                    }
                 }
             } break;
             case MEM_TRANSACTION_LLSC_STORE:
@@ -851,12 +901,20 @@ protected:
             {
                 if(UNLIKELY(needs_split)) {
                     output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_LOAD_FLG, "---> load is marked LOCK but it requires a cache line split, this generates an error\n");
+                    printf("---> load is marked LOCK but it requires a cache line split, this generates an error\n");
                     load_ins->flagError();
                 } else {
                     output->verbose(CALL_INFO, 9, VANADIS_DBG_LSQ_LOAD_FLG, "---> [memory-transaction]: LOCK-load (not split) load-at: 0x%" PRI_ADDR " width: %" PRIu64 "\n",
                         load_address, load_width);
-                    load_req = new StandardMem::ReadLock(load_address & address_mask, load_width, 0,
+
+                    if (load_ins->getHWThread() == (hw_threads-1)) {
+                        load_req = new StandardMem::ReadLock(load_address & address_mask, load_width, 0,
+                                        load_address, load_ins->getInstructionAddress(), 1);
+                    }
+                    else {
+                        load_req = new StandardMem::ReadLock(load_address & address_mask, load_width, 0,
                                         load_address, load_ins->getInstructionAddress(), load_ins->getHWThread());
+                    }
                 }
             } break;
         }

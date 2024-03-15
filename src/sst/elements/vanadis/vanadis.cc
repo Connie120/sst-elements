@@ -31,6 +31,8 @@
 using namespace SST::Vanadis;
 using namespace std;
 
+bool exit_simt = false;
+
 VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params) : Component(id), current_cycle(0),
     m_curRetireHwThread(0), m_curIssueHwThread(0), arrived_thread(0)
 {
@@ -73,6 +75,8 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
     output->verbose(CALL_INFO, 2, 0, "-> I-Cache Line Width:       %" PRIu64 " bytes\n", iCacheLineWidth);
 
     hw_threads = params.find<uint32_t>("hardware_threads", 1);
+    num_warps = (hw_threads % WARP_SIZE) ? (hw_threads / WARP_SIZE + 1) : (hw_threads / WARP_SIZE);
+
     if (hw_threads == 0) {
         output->fatal(CALL_INFO, -1, "Incorrect parameter (%s): 'hardware_threads' cannot be 0. Fix parameter in the input file\n", getName().c_str());
     }
@@ -95,7 +99,7 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
     output->verbose(CALL_INFO, 2, 0, "Physical Integer Registers (GPRs): %5" PRIu16 "\n", int_reg_count);
     output->verbose(CALL_INFO, 2, 0, "Physical Floating-Point Registers: %5" PRIu16 "\n", fp_reg_count);
 
-    halted_masks = new bool[hw_threads];
+    halted_masks = new bool[hw_threads+num_warps];
 
     os_link = configureLink("os_link", "0ns", new Event::Handler<VANADIS_COMPONENT>(this, &VANADIS_COMPONENT::recvOSEvent));
     if ( nullptr == os_link ) {
@@ -169,13 +173,12 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
             thread_decoders[i]->countISAFPReg());
 
         register_files.push_back(new VanadisRegisterFile(
-            i, thread_decoders[i]->getDecoderOptions(), int_reg_count, fp_reg_count, thr_decoder->getFPRegisterMode()));
+            i, thread_decoders[i]->getDecoderOptions(), int_reg_count, fp_reg_count, thr_decoder->getFPRegisterMode(), false));
 
         output->verbose(
             CALL_INFO, 8, 0, "Reorder buffer set to %" PRIu32 " entries, these are shared by all threads.\n",
             rob_count);
         rob.push_back(new VanadisCircularQueue<VanadisInstruction*>(rob_count));
-        v_warp_rob.push_back(new VanadisCircularQueue<warp_inst*>(rob_count));
         
         // WE NEED ISA INTEGER AND FP COUNTS HERE NOT ZEROS
         issue_isa_tables.push_back(new VanadisISATable( "issue",
@@ -183,7 +186,6 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
             thread_decoders[i]->countISAFPReg()));
 
         thread_decoders[i]->setThreadROB(rob[i]);
-        thread_decoders[i]->setSIMTROB(v_warp_rob[i]);
 
         for ( uint16_t j = 0; j < thread_decoders[i]->countISAIntReg(); ++j ) {
             issue_isa_tables[i]->setIntPhysReg(j, int_register_stack->pop());
@@ -203,8 +205,26 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         simt_threads.push_back(new thread_info(i, 0, i/WARP_SIZE)); // TODO: what's the starting pc?
     }
 
-    int num_warps = (hw_threads % WARP_SIZE) ? (hw_threads / WARP_SIZE + 1) : (hw_threads / WARP_SIZE);
+    // SIMT initialization
+    printf("num_warps: %u\n", num_warps);
     for ( uint32_t i = 0; i < num_warps; ++i ) {
+        snprintf(decoder_name, 64, "decoder%" PRIu32 "", i+hw_threads);
+        VanadisDecoder* warp_decoder = loadUserSubComponent<SST::Vanadis::VanadisDecoder>(decoder_name);
+        v_warp_rob.push_back(new VanadisCircularQueue<VanadisInstruction*>(rob_count));
+        warp_decoder->setHardwareThread(hw_threads+i);  // SIMT starts from the last thread
+        simt_decoders.push_back(warp_decoder);
+        simt_decoders[i]->setThreadROB(v_warp_rob[i]);
+        fp_flags.push_back(new VanadisFloatingPointFlags());
+        simt_decoders[i]->setFPFlags(fp_flags[i+hw_threads]);
+        simt_decoders[i]->getOSHandler()->setOS_link(os_link);
+        simt_decoders[i]->setInsCacheLineWidth(iCacheLineWidth);
+
+        isa_options.push_back(simt_decoders[i]->getDecoderOptions());
+
+        register_files.push_back(new VanadisRegisterFile(
+            i+hw_threads, simt_decoders[i]->getDecoderOptions(), int_reg_count, fp_reg_count, warp_decoder->getFPRegisterMode(), 
+            false));
+
         bitset<WARP_SIZE> mask;
         if (hw_threads / WARP_SIZE > i) {
             mask = bitset<WARP_SIZE>(0xffffffff);
@@ -222,6 +242,30 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
             thread_decoders[0]->countISAFPReg()), new VanadisISATable( "retire",
             thread_decoders[0]->getDecoderOptions(), thread_decoders[0]->countISAIntReg(),
             thread_decoders[0]->countISAFPReg()))); // TODO: Add rr tables and reset, check the # regs used per thread in config file
+
+        issue_isa_tables.push_back(new VanadisISATable( "issue",
+            simt_decoders[i]->getDecoderOptions(), simt_decoders[i]->countISAIntReg(),
+            simt_decoders[i]->countISAFPReg()));
+
+        for ( uint16_t j = 0; j < simt_decoders[i]->countISAIntReg(); ++j ) {
+            issue_isa_tables[i+hw_threads]->setIntPhysReg(j, int_register_stack->pop());
+        }
+
+        for ( uint16_t j = 0; j < simt_decoders[i]->countISAFPReg(); ++j ) {
+            issue_isa_tables[i+hw_threads]->setFPPhysReg(j, fp_register_stack->pop());
+        }
+
+        retire_isa_tables.push_back(new VanadisISATable( "retire",
+            simt_decoders[i]->getDecoderOptions(), simt_decoders[i]->countISAIntReg(),
+            simt_decoders[i]->countISAFPReg()));
+        retire_isa_tables[i+hw_threads]->reset(issue_isa_tables[i+hw_threads]);
+
+        simt_decoders[i]->getOSHandler()->setCoreID(core_id);
+        simt_decoders[i]->getOSHandler()->setHWThread(i+hw_threads);
+        simt_decoders[i]->getOSHandler()->setRegisterFile(register_files[i+hw_threads]);
+        simt_decoders[i]->getOSHandler()->setISATable(retire_isa_tables[i+hw_threads]);
+
+        halted_masks[hw_threads+i] = true;
     }
 
     delete[] decoder_name;
@@ -237,7 +281,7 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
     //	printf("MAX INT: %" PRIu16 ", MAX FP: %" PRIu16 "\n", max_int_regs,
     // max_fp_regs );
 
-    for ( uint32_t i = 0; i < hw_threads; ++i ) {
+    for ( uint32_t i = 0; i < hw_threads + num_warps; ++i ) {
         tmp_not_issued_int_reg_read.push_back( new uint8_t[max_int_regs] );
         tmp_int_reg_write.push_back( new uint8_t[max_int_regs] );
         tmp_not_issued_fp_reg_read.push_back( new uint8_t[max_fp_regs] );
@@ -269,8 +313,12 @@ VANADIS_COMPONENT::VANADIS_COMPONENT(SST::ComponentId_t id, SST::Params& params)
         output->verbose(CALL_INFO, 8, 0, "Configuring thread instruction cache interface (thread %" PRIu32 ")\n", i);
         thread_decoders[i]->getInstructionLoader()->setMemoryInterface(memInstInterface);
     }
+    for ( uint32_t i = 0; i < simt_decoders.size(); ++i ) {
+        output->verbose(CALL_INFO, 8, 0, "Configuring thread instruction cache interface (thread %" PRIu32 ")\n", i+hw_threads);
+        simt_decoders[i]->getInstructionLoader()->setMemoryInterface(memInstInterface);
+    }
 
-    lsq = loadUserSubComponent<SST::Vanadis::VanadisLoadStoreQueue>("lsq", ComponentInfo::SHARE_NONE, core_id, hw_threads);
+    lsq = loadUserSubComponent<SST::Vanadis::VanadisLoadStoreQueue>("lsq", ComponentInfo::SHARE_NONE, core_id, hw_threads+num_warps);
     if ( nullptr == lsq ) {
         output->fatal(CALL_INFO, -1, "Error - unable to load the load-store queue (lsq subcomponent)\n");
     }
@@ -409,7 +457,7 @@ VANADIS_COMPONENT::~VANADIS_COMPONENT()
 		delete next_fp_flags;
 	}
 
-    for ( uint32_t i = 0; i < hw_threads; i++ ) {
+    for ( uint32_t i = 0; i < hw_threads+num_warps; i++ ) {
         delete[] tmp_not_issued_int_reg_read[i];
         delete[] tmp_int_reg_write[i];
         delete[] tmp_not_issued_fp_reg_read[i];
@@ -451,10 +499,10 @@ VANADIS_COMPONENT::setHalt(uint32_t thr, int64_t halt_code)
     output->verbose(
         CALL_INFO, 2, 0, "-> Receive halt request on thread %" PRIu32 " / code: %" PRId64 "\n", thr, halt_code);
 
-    if ( thr >= hw_threads ) {
-        // Incorrect thread, ignore? error?
-    }
-    else {
+    // if ( thr >= hw_threads ) {
+    //     // Incorrect thread, ignore? error?
+    // }
+    // else {
         switch ( halt_code ) {
         default:
         {
@@ -465,11 +513,12 @@ VANADIS_COMPONENT::setHalt(uint32_t thr, int64_t halt_code)
 
             bool all_halted = true;
 
-            for ( uint32_t i = 0; i < hw_threads; ++i ) {
+            for ( uint32_t i = 0; i < hw_threads+num_warps; ++i ) {
                 all_halted = all_halted & halted_masks[i];
             }
 
             if ( all_halted ) {
+                exit_simt = true;
                 output->verbose(
                     CALL_INFO, 2, 0,
                     "-> all threads on core are halted, tell core we can "
@@ -478,7 +527,7 @@ VANADIS_COMPONENT::setHalt(uint32_t thr, int64_t halt_code)
             }
         } break;
         }
-    }
+    // }
 }
 
 int
@@ -503,13 +552,35 @@ VANADIS_COMPONENT::performDecode(const uint64_t cycle)
         ins_decoded_this_cycle += (decoded_cycle > 0) ? static_cast<uint64_t>(decoded_cycle) : 0;
     }
 
+    for ( uint32_t i = 0; i < num_warps; ++i ) {
+        const int64_t rob_before_decode = (int64_t)v_warp_rob[i]->size();
+
+        // If thread is not masked then decode from it
+        if ( !halted_masks[hw_threads+i] ) { 
+            // printf("simt starts to decode instructions\n");
+            // printf("Decode thread %u\n", hw_threads+i);
+            simt_decoders[i]->tick(output, (uint64_t)cycle); 
+        }
+
+        const int64_t rob_after_decode = (int64_t)v_warp_rob[i]->size();
+        if (rob_after_decode != 0) {
+            printf("simt rob after decode %d\n", rob_after_decode);
+        }
+        const int64_t decoded_cycle    = (rob_after_decode - rob_before_decode);
+        ins_decoded_this_cycle += (decoded_cycle > 0) ? static_cast<uint64_t>(decoded_cycle) : 0;
+        if (print_rob && v_warp_rob[i]->size() != 0) {
+            // printf("simt rob warp %u\n", i);
+            printRob(i+hw_threads, v_warp_rob[i]);
+        }
+    }
+
     return 0;
 }
 
 void
 VANADIS_COMPONENT::resetRegisterUseTemps(const uint16_t int_reg_count, const uint16_t fp_reg_count)
 {
-    for ( uint32_t i = 0; i < hw_threads; i++ ) {
+    for ( uint32_t i = 0; i < hw_threads+num_warps; i++ ) {
         std::memset(tmp_not_issued_int_reg_read[i], 0, int_reg_count);
         std::memset(tmp_int_reg_write[i], 0, int_reg_count);
         std::memset(tmp_not_issued_fp_reg_read[i], 0, fp_reg_count);
@@ -537,12 +608,21 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, int hwThr, uint32_t& rob_s
 #endif
             // we have not issued an instruction this cycle
             issued_an_ins = false;
+            bool isSIMT = (hwThr >= hw_threads) ? true : false;
+
+            VanadisCircularQueue<VanadisInstruction*>* thr_rob;
+            if (isSIMT) {
+                thr_rob = v_warp_rob[hwThr-hw_threads];
+            }
+            else {
+                thr_rob = rob[hwThr];
+            }
 
             // Find the next instruction which has not been issued yet
-            const auto rob_size = rob[i]->size();
+            const auto rob_size = thr_rob->size();
 
             for ( auto j = rob_start; j < rob_size; ++j ) {
-                VanadisInstruction* ins = rob[i]->peekAt(j);
+                VanadisInstruction* ins = thr_rob->peekAt(j);
 
                 if ( ! ins->completedIssue() ) {
 #ifdef VANADIS_BUILD_DEBUG
@@ -595,9 +675,18 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, int hwThr, uint32_t& rob_s
                         }
 #endif
                         if ( 0 == allocate_fu ) {
-                            const int status = assignRegistersToInstruction(
-                                thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg(), ins,
-                                int_register_stack, fp_register_stack, issue_isa_tables[i]);
+                            int status = 0;
+                            
+                            if (isSIMT) {
+                                status = assignRegistersToInstruction(
+                                    simt_decoders[i-hw_threads]->countISAIntReg(), simt_decoders[i-hw_threads]->countISAFPReg(), ins,
+                                    int_register_stack, fp_register_stack, issue_isa_tables[i]);
+                            }
+                            else {
+                                status = assignRegistersToInstruction(
+                                    thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg(), ins,
+                                    int_register_stack, fp_register_stack, issue_isa_tables[i]);
+                            }
 
 #ifdef VANADIS_BUILD_DEBUG
                             if ( checkVerboseAddr( ins->getInstructionAddress() ) ) {
@@ -610,7 +699,7 @@ VANADIS_COMPONENT::performIssue(const uint64_t cycle, int hwThr, uint32_t& rob_s
                                     ins->getHWThread(), instPrintBuffer, ins->getInstructionAddress(), status);
                                 if ( print_rob && i != 0) {
                                     printf("issue rob thr %u\n", i);
-                                    printRob(i,rob[i]);
+                                    printRob(i,thr_rob);
                                 }
                             }
 #endif
@@ -782,6 +871,14 @@ VANADIS_COMPONENT::performRetire(int rob_num, VanadisCircularQueue<VanadisInstru
     bool                perform_pipeline_clear = false;
     const uint32_t      ins_thread             = rob->peekAt(0)->getHWThread();
 
+    VanadisDecoder* thr_decoder;
+    if (ins_thread >= hw_threads) {
+        thr_decoder = simt_decoders[ins_thread-hw_threads];
+    }
+    else {
+        thr_decoder = thread_decoders[ins_thread];
+    }
+
     // Instruction is flagging error, print out and halt
     if ( UNLIKELY(rob_front->trapsError()) ) {
         output->verbose(
@@ -893,8 +990,8 @@ VANADIS_COMPONENT::performRetire(int rob_num, VanadisCircularQueue<VanadisInstru
                 }
                 }
 #endif
-                thread_decoders[ins_thread]->getBranchPredictor()->push(
-                    spec_ins->getInstructionAddress(), pipeline_reset_addr);
+                thr_decoder->getBranchPredictor()->push(
+                spec_ins->getInstructionAddress(), pipeline_reset_addr);
 
                 if ( stop_verbose_when_retire_address > 0 && (rob_front->getInstructionAddress() == stop_verbose_when_retire_address) ) {
                     output->setVerboseLevel(0);
@@ -1069,6 +1166,9 @@ VANADIS_COMPONENT::performRetire(int rob_num, VanadisCircularQueue<VanadisInstru
                     }
 
 #ifdef VANADIS_BUILD_DEBUG
+                    printf("[syscall] -> calling OS handler in decode engine "
+                        "(ins-addr: 0x%0" PRI_ADDR ")...\n",
+                        the_syscall_ins->getInstructionAddress());
                     output->verbose(
                         CALL_INFO, 8, VANADIS_DBG_RETIRE_FLG,
                         "[syscall] -> calling OS handler in decode engine "
@@ -1076,7 +1176,7 @@ VANADIS_COMPONENT::performRetire(int rob_num, VanadisCircularQueue<VanadisInstru
                         the_syscall_ins->getInstructionAddress());
 #endif
                     bool ret, flushLSQ;
-                    std::tie( ret, flushLSQ) = thread_decoders[rob_front->getHWThread()]->getOSHandler()->handleSysCall(the_syscall_ins);
+                    std::tie( ret, flushLSQ) = thr_decoder->getOSHandler()->handleSysCall(the_syscall_ins);
 
                     // mark as front of ROB now we can proceed
                     rob_front->markFrontOfROB();
@@ -1227,6 +1327,13 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
         return true;
     }
 
+    if ( exit_simt ) {
+        output->verbose(
+            CALL_INFO, 0, 0,
+            "-> exit.\n");
+        return true;
+    }
+
 #ifdef VANADIS_BUILD_DEBUG
     const auto output_verbosity = output->getVerboseLevel();
 #endif
@@ -1271,7 +1378,7 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
     }
 #endif
 
-    for ( uint32_t i = 0; i < hw_threads; ++i ) {
+    for ( uint32_t i = 0; i < hw_threads+num_warps; ++i ) {
         const uint16_t zero_reg = isa_options[i]->getRegisterIgnoreWrites();
 
         if ( zero_reg < isa_options[i]->countISAIntRegisters() ) {
@@ -1292,14 +1399,14 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
     // Retire
     // //////////////////////////////////////////////////////////////////////////
 {
-    std::vector<int>  rc(hw_threads,0);
-    auto cnt = hw_threads;
+    std::vector<int>  rc(hw_threads+num_warps,0);
+    auto cnt = hw_threads+num_warps;
     for ( uint32_t i = 0; i < retires_per_cycle; ++i ) {
 
         // find an unblocked hardware thread
         while ( 1 == rc[m_curRetireHwThread] && cnt ) {
             ++m_curRetireHwThread;
-            m_curRetireHwThread %= hw_threads;
+            m_curRetireHwThread %= (hw_threads+num_warps);
             --cnt;
         }
 
@@ -1307,11 +1414,16 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
         if ( cnt ) {
             auto thr = m_curRetireHwThread;
             // printf("retire rob thr %u\n", i);
-            rc[thr] = performRetire(thr, rob[thr], cycle);
+            if (thr >= hw_threads) {
+                rc[thr] = performRetire(thr, v_warp_rob[thr-hw_threads], cycle);
+            }
+            else {
+                rc[thr] = performRetire(thr, rob[thr], cycle);
+            }
 
             ++m_curRetireHwThread;
-            m_curRetireHwThread %= hw_threads;
-            cnt = hw_threads;
+            m_curRetireHwThread %= (hw_threads+num_warps);
+            cnt = hw_threads+num_warps;
         } else {
             break;
         }
@@ -1347,20 +1459,23 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
     for ( uint32_t i = 0; i < hw_threads; ++i ) {
         resetRegisterUseTemps(thread_decoders[i]->countISAIntReg(), thread_decoders[i]->countISAFPReg());
     }
+    for ( uint32_t i = 0; i < num_warps; ++i ) {
+        resetRegisterUseTemps(simt_decoders[i]->countISAIntReg(), simt_decoders[i]->countISAFPReg());
+    }
 
 {
-    std::vector<uint32_t> rob_start(hw_threads,0);
-    std::vector<int> unallocated_memory_op_seen(hw_threads,false);
+    std::vector<uint32_t> rob_start(hw_threads+num_warps,0);
+    std::vector<int> unallocated_memory_op_seen(hw_threads+num_warps,false);
 
     // Attempt to perform issues, cranking through the entire ROB call by call or until we
     // reach the max issues this cycle
-    std::vector<int> rc(hw_threads,0);
-    auto cnt = hw_threads;
+    std::vector<int> rc(hw_threads+num_warps,0);
+    auto cnt = hw_threads + num_warps;
     for ( uint32_t i = 0; i < issues_per_cycle; ++i ) {
         // find an unblocked hardware thread
         while ( 0 != rc[m_curIssueHwThread] && cnt ) {
             ++m_curIssueHwThread;
-            m_curIssueHwThread %= hw_threads;
+            m_curIssueHwThread %= (hw_threads + num_warps);
             --cnt;
         }
 
@@ -1369,8 +1484,8 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
             auto thr = m_curIssueHwThread;
             rc[thr] = performIssue(cycle, thr, rob_start[thr], unallocated_memory_op_seen[thr]);
             ++m_curIssueHwThread;
-            m_curIssueHwThread %= hw_threads;
-            cnt = hw_threads;
+            m_curIssueHwThread %= (hw_threads + num_warps);
+            cnt = (hw_threads + num_warps);
         } else {
             break;
         }
@@ -1413,6 +1528,9 @@ VANADIS_COMPONENT::tick(SST::Cycle_t cycle)
     uint64_t rob_total_count = 0;
     for ( uint32_t i = 0; i < hw_threads; ++i ) {
         rob_total_count += rob[i]->size();
+    }
+    for ( uint32_t i = 0; i < num_warps; ++i ) {
+        rob_total_count += v_warp_rob[i]->size();
     }
     stat_rob_entries->addData(rob_total_count);
 
@@ -1892,6 +2010,13 @@ VANADIS_COMPONENT::handleIncomingInstCacheEvent(StandardMem::Request* ev)
         }
     }
 
+    for ( VanadisDecoder* next_decoder : simt_decoders ) {
+        if ( next_decoder->acceptCacheResponse(output, ev) ) {
+            hit = true;
+            break;
+        }
+    }
+
     if ( hit ) { output->verbose(CALL_INFO, 16, 0, "---> Successful hit in hardware-thread decoders.\n"); }
 
     delete ev;
@@ -1919,7 +2044,12 @@ VANADIS_COMPONENT::handleMisspeculate(const uint32_t hw_thr, const uint64_t new_
     issue_isa_tables[hw_thr]->reset(retire_isa_tables[hw_thr]);
 
     // Notify the decoder we need a clear and reset to new instruction pointer
-    thread_decoders[hw_thr]->setInstructionPointerAfterMisspeculate(output, new_ip);
+    if (hw_thr >= hw_threads) {
+        simt_decoders[hw_thr-hw_threads]->setInstructionPointerAfterMisspeculate(output, new_ip);
+    }
+    else {
+        thread_decoders[hw_thr]->setInstructionPointerAfterMisspeculate(output, new_ip);
+    }
 
 #ifdef VANADIS_BUILD_DEBUG
     if(output->getVerboseLevel() >= 16) {
@@ -1939,7 +2069,13 @@ VANADIS_COMPONENT::clearFuncUnit(const uint32_t hw_thr, std::vector<VanadisFunct
 void
 VANADIS_COMPONENT::clearROBMisspeculate(const uint32_t hw_thr)
 {
-    VanadisCircularQueue<VanadisInstruction*>* thr_rob = rob[hw_thr];
+    VanadisCircularQueue<VanadisInstruction*>* thr_rob;
+    if (hw_thr >= hw_threads) {
+        thr_rob = v_warp_rob[hw_thr-hw_threads];
+    }
+    else {
+        thr_rob = rob[hw_thr];
+    }
     stat_rob_cleared_entries->addData(thr_rob->size());
 
     // Delete all the instructions which we aren't going to process
@@ -1958,11 +2094,18 @@ VANADIS_COMPONENT::clearROBMisspeculate(const uint32_t hw_thr)
 void
 VANADIS_COMPONENT::syscallReturn(uint32_t thr)
 {
-    if ( rob[thr]->empty() ) {
+    VanadisCircularQueue<VanadisInstruction*>* thr_rob;
+    if (thr >= hw_threads) {
+        thr_rob = v_warp_rob[thr-hw_threads];
+    }
+    else {
+        thr_rob = rob[thr];
+    }
+    if ( thr_rob->empty() ) {
         output->fatal(CALL_INFO, -1, "Error - syscall return called on thread: %" PRIu32 " but ROB is empty.\n", thr);
     }
 
-    VanadisInstruction*        rob_front   = rob[thr]->peek();
+    VanadisInstruction*        rob_front   = thr_rob->peek();
     VanadisSysCallInstruction* syscall_ins = dynamic_cast<VanadisSysCallInstruction*>(rob_front);
 
     if ( nullptr == syscall_ins ) {
@@ -1995,37 +2138,52 @@ void VANADIS_COMPONENT::recvOSEvent(SST::Event* ev) {
         output->verbose(CALL_INFO, 8, 0, "-> issuing call-backs to clear syscall ROB stops...\n");
 
         if ( ! os_resp->hasExited() ) {
-            thread_decoders[hw_thr]->getOSHandler()->recvSyscallResp ( os_resp );
+            if (hw_thr >= hw_threads) {
+                simt_decoders[hw_thr-hw_threads]->getOSHandler()->recvSyscallResp ( os_resp );
+            }
+            else {
+                thread_decoders[hw_thr]->getOSHandler()->recvSyscallResp ( os_resp );
+            }
             ev = nullptr;
+            if (hw_thr == 1) {
+                hw_thr = 5;
+            }
             syscallReturn( hw_thr );
         } else {
-            output->verbose(CALL_INFO, 8, 0, "-> thread has exited, leave in halted state\n");
+            output->verbose(CALL_INFO, 1, 0, "-> thread has exited, leave in halted state\n");
+            if (hw_thr == 1) {
+                setHalt(5, 0);
+                setHalt(0, 0);
+            }
         }
 
     } else {
-
         VanadisStartThreadFirstReq* os_req = dynamic_cast<VanadisStartThreadFirstReq*>(ev);
         if ( nullptr != os_req ) {
             startThread( os_req->getThread(), os_req->getStackAddr(), os_req->getInstPtr() );
         } else {
-
+            
             VanadisStartThreadForkReq* req = dynamic_cast<VanadisStartThreadForkReq*>(ev);
             if ( nullptr != req ) {
+                printf("hw_thr in os: %d\n", req->getThread());
                 startThreadFork( req );
             } else {
 
                 VanadisGetThreadStateReq* req = dynamic_cast<VanadisGetThreadStateReq*>(ev);
                 if ( nullptr != req ) {
+                    printf("hw_thr in os: %d\n", req->getThread());
                     getThreadState( req );
                 } else {
 
                     VanadisStartThreadCloneReq* req = dynamic_cast<VanadisStartThreadCloneReq*>(ev);
                     if ( nullptr != req ) {
+                        printf("hw_thr in os: %d\n", req->getThread());
                         startThreadClone( req );
                     } else {
 
                         VanadisExitResponse* os_exit = dynamic_cast<VanadisExitResponse*>(ev);
                         if ( nullptr != os_exit ) {
+                            printf("hw_thr in os: %d\n", req->getThread());
                             output->verbose(CALL_INFO, 2, 0,
                                 "received an exit command from the operating system for hw_thr %d "
                                 "(return-code: %" PRId64 " )\n",
@@ -2037,6 +2195,7 @@ void VANADIS_COMPONENT::recvOSEvent(SST::Event* ev) {
 
                             VanadisDumpRegsReq* req = dynamic_cast<VanadisDumpRegsReq*>(ev);
                             if (nullptr != req ) {
+                                printf("hw_thr in os: %d\n", req->getThread());
                                 dumpRegs(req);
                             } else {
                                 assert(0);
@@ -2089,10 +2248,43 @@ void VANADIS_COMPONENT::startThreadClone( VanadisStartThreadCloneReq* req )
     thr_decoder->setThreadPointer( output, isa_table, reg_file, req->getTlsAddr() );
 
     arrived_thread++;
-    if (arrived_thread == (hw_threads - 1)) {
-        for (int i = 1; i < hw_threads; i++) {
-            halted_masks[i]            = false;
+    if (arrived_thread % WARP_SIZE == 0 || arrived_thread == (hw_threads - 1)) {
+        // for (int i = 1; i < hw_threads; i++) {
+        //     halted_masks[i] = false;
+        // }
+        int warpid = 0;
+        if (arrived_thread % WARP_SIZE == 0) {
+            warpid = arrived_thread / WARP_SIZE - 1;
         }
+        else {
+            warpid = arrived_thread / WARP_SIZE;
+        }
+
+        // printf("Thread %u reg %u: %d\n", hw_thr, 933, reg_file->getIntReg<int64_t>(933));
+
+        auto isa_table = retire_isa_tables[hw_threads+warpid];
+        auto reg_file = register_files[hw_threads+warpid];
+        auto thr_decoder = simt_decoders[warpid];
+
+        for ( int i = 0; i < req->getIntRegs().size(); i++ ) {
+            reg_file->setIntReg<uint64_t>(isa_table->getIntPhysReg(i), req->getIntRegs()[i]);
+        }
+        for ( int i = 0; i < req->getFpRegs().size(); i++ ) {
+            if ( VANADIS_REGISTER_MODE_FP32 == thr_decoder->getFPRegisterMode() ) {
+                reg_file->setFPReg<uint32_t>(isa_table->getFPPhysReg(i), req->getFpRegs()[i]);
+            } else {
+                reg_file->setFPReg<uint64_t>(isa_table->getFPPhysReg(i), req->getFpRegs()[i]);
+            }
+        }
+
+        thr_decoder->setArg1Register( output, isa_table, reg_file, req->getArgAddr() );
+        thr_decoder->setFuncPointer( output, isa_table, reg_file, req->getInstPtr() );
+        thr_decoder->setStackPointer( output, isa_table, reg_file, req->getStackAddr() );
+        thr_decoder->setThreadLocalStoragePointer( req->getTlsAddr() );
+        thr_decoder->setThreadPointer( output, isa_table, reg_file, req->getTlsAddr() );
+
+        halted_masks[hw_threads+warpid] = false;
+        handleMisspeculate(hw_threads+warpid, req->getInstPtr());
     }
     handleMisspeculate( hw_thr, req->getInstPtr() );
 }

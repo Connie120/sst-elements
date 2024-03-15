@@ -335,15 +335,19 @@ VanadisNodeOSComponent::handleIncomingSyscall(SST::Event* ev) {
                       "a system-call event.\n");
         }
     } else {
-	auto process = m_coreInfoMap.at(sys_ev->getCoreID()).getProcess( sys_ev->getThreadID() );
-	if ( process ) {
-		auto syscall = handleIncomingSyscall( process, sys_ev, core_links[ sys_ev->getCoreID() ] );
+        int ev_thr = sys_ev->getThreadID();
+        if (sys_ev->getThreadID() == 5) {
+            ev_thr = 1;
+        }
+        auto process = m_coreInfoMap.at(sys_ev->getCoreID()).getProcess( ev_thr );
+        if ( process ) {
+            auto syscall = handleIncomingSyscall( process, sys_ev, core_links[ sys_ev->getCoreID() ] );
 
-		processSyscallPost( syscall );
-	} else {
-		printf("no active process for core %d, hwthread %d\n", sys_ev->getCoreID(), sys_ev->getThreadID() );
-		delete ev;
-	}
+            processSyscallPost( syscall );
+        } else {
+            printf("no active process for core %d, hwthread %d\n", sys_ev->getCoreID(), sys_ev->getThreadID() );
+            delete ev;
+        }
     } 
 }
 

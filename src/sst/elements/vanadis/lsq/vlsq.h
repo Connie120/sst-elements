@@ -31,7 +31,7 @@
 #include <queue>
 
 #define VANADIS_DBG_LSQ_STORE_FLG  (1<<0)
-#define VANADIS_DBG_LSQ_LOAD_FLG  (1<<1)
+#define VANADIS_DBG_LSQ_LOAD_FLG  (1<<0)
 
 namespace SST {
 namespace Vanadis {

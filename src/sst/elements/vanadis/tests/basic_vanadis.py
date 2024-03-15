@@ -64,7 +64,7 @@ sst.setStatisticOutput("sst.statOutputConsole")
 full_exe_name = os.getenv("VANADIS_EXE", "./riscv/pthread_musl" )
 exe_name= full_exe_name.split("/")[-1]
 
-verbosity = int(os.getenv("VANADIS_VERBOSE", 8))
+verbosity = int(os.getenv("VANADIS_VERBOSE", 2))
 os_verbosity = os.getenv("VANADIS_OS_VERBOSE", verbosity)
 pipe_trace_file = os.getenv("VANADIS_PIPE_TRACE", "")
 lsq_ld_entries = os.getenv("VANADIS_LSQ_LD_ENTRIES", 16)
@@ -85,6 +85,14 @@ cpu_clock = os.getenv("VANADIS_CPU_CLOCK", "2.3GHz")
 
 numCpus = int(os.getenv("VANADIS_NUM_CORES", 1))
 numThreads = int(os.getenv("VANADIS_NUM_HW_THREADS", 5))
+
+# TODO: change this to env variable
+warp_size = 32
+
+if (numThreads % warp_size != 0):
+    num_warps = numThreads // warp_size + 1
+else:
+    num_warps = numThreads // warp_size
 
 vanadis_cpu_type = "vanadis."
 vanadis_cpu_type += os.getenv("VANADIS_CPU_ELEMENT_NAME","dbg_VanadisCPU")
@@ -129,7 +137,7 @@ osParams = {
     "dbgLevel" : os_verbosity,
     "dbgMask" : 8,
     "cores" : numCpus,
-    "hardwareThreadCount" : numThreads,
+    "hardwareThreadCount" : numThreads+num_warps,
     "page_size"  : 4096,
     "physMemSize" : physMemSize,
     "useMMU" : True,
@@ -167,7 +175,7 @@ osl1cacheParams = {
 mmuParams = {
     "debug_level": 0,
     "num_cores": numCpus,
-    "num_threads": numThreads,
+    "num_threads": numThreads+num_warps,
     "page_size": 4096,
 }
 
@@ -217,7 +225,7 @@ memParams = {
 tlbParams = {
     "debug_level": 0,
     "hitLatency": 1,
-    "num_hardware_threads": numThreads,
+    "num_hardware_threads": numThreads+num_warps,
     "num_tlb_entries_per_thread": 64,
     "tlb_set_size": 4,
 }
@@ -242,8 +250,8 @@ cpuParams = {
     "clock" : cpu_clock,
     "verbose" : verbosity,
     "hardware_threads": numThreads,
-    "physical_fp_registers" : 168 * numThreads,
-    "physical_integer_registers" : 180 * numThreads,
+    "physical_fp_registers" : 168 * (numThreads + num_warps),
+    "physical_integer_registers" : 180 * (numThreads + num_warps),
     "integer_arith_cycles" : integer_arith_cycles,
     "integer_arith_units" : integer_arith_units,
     "fp_arith_cycles" : fp_arith_cycles,
@@ -278,8 +286,8 @@ l1dcacheParams = {
     "cache_line_size" : "64",
     "cache_size" : "32 KB",
     "L1" : "1",
-    "debug" : mh_debug,
-    "debug_level" : mh_debug_level,
+    "debug" : "10",
+    "debug_level" : "3",
 }
 
 l1icacheParams = {
@@ -335,7 +343,7 @@ class CPU_Builder:
         cpu.enableAllStatistics()
 
         # CPU.decoder
-        for n in range(numThreads):
+        for n in range(numThreads+num_warps):
             decode     = cpu.setSubComponent( "decoder"+str(n), vanadis_decoder )
             decode.addParams( decoderParams )
 
@@ -349,6 +357,21 @@ class CPU_Builder:
             branch_pred = decode.setSubComponent( "branch_unit", "vanadis.VanadisBasicBranchUnit" )
             branch_pred.addParams( branchPredParams )
             branch_pred.enableAllStatistics()
+
+        # for n in range(num_warps):
+        #     decode = cpu.setSubComponent("decoder_simt"+str(numThreads+n), vanadis_decoder )
+        #     decode.addParams( decoderParams )
+
+        #     decode.enableAllStatistics()
+
+        #     # CPU.decoder.osHandler 
+        #     os_hdlr     = decode.setSubComponent( "os_handler", vanadis_os_hdlr )
+        #     os_hdlr.addParams( osHdlrParams )
+
+        #     # CPU.decocer.branch_pred
+        #     branch_pred = decode.setSubComponent( "branch_unit", "vanadis.VanadisBasicBranchUnit" )
+        #     branch_pred.addParams( branchPredParams )
+        #     branch_pred.enableAllStatistics()
 
         # CPU.lsq
         cpu_lsq = cpu.setSubComponent( "lsq", "vanadis.VanadisBasicLoadStoreQueue" )
@@ -365,9 +388,9 @@ class CPU_Builder:
         cpu_l1dcache = sst.Component(prefix + ".l1dcache", "memHierarchy.Cache")
         cpu_l1dcache.addParams( l1dcacheParams )
 
-        # L1 I-cache to cpu interface 
+        # L1 D-cache to cpu interface 
         l1dcache_2_cpu     = cpu_l1dcache.setSubComponent("cpulink", "memHierarchy.MemLink")
-        # L1 I-cache to L2 interface 
+        # L1 D-cache to L2 interface 
         l1dcache_2_l2cache = cpu_l1dcache.setSubComponent("memlink", "memHierarchy.MemLink")
 
         # L2 I-cache
